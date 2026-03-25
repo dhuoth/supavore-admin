@@ -1,11 +1,14 @@
 'use client';
 
-import { useSearchParams } from 'next/navigation';
+import { useState } from 'react';
 import { supabase } from '@/lib/supabaseClient';
 
 export default function LoginPage() {
-  const searchParams = useSearchParams();
-  const error = searchParams.get('error');
+  const [error] = useState<string | null>(() =>
+    typeof window === 'undefined'
+      ? null
+      : new URLSearchParams(window.location.search).get('error')
+  );
 
   const handleGoogleLogin = async () => {
     await supabase.auth.signInWithOAuth({
