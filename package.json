@@ -6,9 +6,11 @@
     "dev": "next dev",
     "build": "next build",
     "start": "next start",
-    "lint": "eslint"
+    "lint": "eslint",
+    "test": "node --import ./test/register-aliases.mjs --test --experimental-strip-types lib/*.test.ts"
   },
   "dependencies": {
+    "@supabase/supabase-js": "^2.99.2",
     "next": "16.1.7",
     "react": "19.2.3",
     "react-dom": "19.2.3"
