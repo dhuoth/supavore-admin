@@ -2,6 +2,7 @@
 
 import { useEffect } from 'react';
 import { useRouter } from 'next/navigation';
+import { isAdminAllowlistedEmail } from '@/lib/adminAuth';
 import { supabase } from '@/lib/supabaseClient';
 
 export default function AuthCallback() {
@@ -24,8 +25,21 @@ export default function AuthCallback() {
         data: { user },
       } = await supabase.auth.getUser();
 
-      if (!user) {
+      if (!user?.email) {
+        await supabase.auth.signOut();
+        await fetch('/api/auth/session', {
+          method: 'DELETE',
+        });
         router.push('/login');
+        return;
+      }
+
+      if (!isAdminAllowlistedEmail(user.email)) {
+        await supabase.auth.signOut();
+        await fetch('/api/auth/session', {
+          method: 'DELETE',
+        });
+        router.push('/login?error=access_denied');
         return;
       }
 
@@ -34,7 +48,7 @@ export default function AuthCallback() {
       } = await supabase.auth.getSession();
 
       if (session?.access_token && session.refresh_token) {
-        await fetch('/api/auth/session', {
+        const response = await fetch('/api/auth/session', {
           method: 'POST',
           headers: {
             'Content-Type': 'application/json',
@@ -45,23 +59,22 @@ export default function AuthCallback() {
             expiresAt: session.expires_at ?? null,
           }),
         });
-      }
 
-      // Check if profile exists
-      const { data: existingProfile } = await supabase
-        .from('profiles')
-        .select('id')
-        .eq('id', user.id)
-        .single();
-
-      if (!existingProfile) {
-        // Create profile automatically
-        await supabase.from('profiles').insert({
-          id: user.id,
-          email: user.email,
-          first_name: user.user_metadata?.full_name || '',
-          role: 'user',
+        if (!response.ok) {
+          await supabase.auth.signOut();
+          await fetch('/api/auth/session', {
+            method: 'DELETE',
+          });
+          router.push(response.status === 403 ? '/login?error=access_denied' : '/login');
+          return;
+        }
+      } else {
+        await supabase.auth.signOut();
+        await fetch('/api/auth/session', {
+          method: 'DELETE',
         });
+        router.push('/login');
+        return;
       }
 
       router.push('/');

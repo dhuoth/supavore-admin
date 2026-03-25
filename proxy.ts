@@ -63,13 +63,22 @@ export async function proxy(request: NextRequest) {
         { status: result.status }
       );
 
-      clearSessionCookies(response);
+      if (result.status === 401 || result.status === 403) {
+        clearSessionCookies(response);
+      }
       return response;
     }
 
-    const loginUrl = new URL('/login', request.url);
-    const response = NextResponse.redirect(loginUrl);
-    clearSessionCookies(response);
+    const redirectUrl = new URL(
+      result.status === 403 ? '/login?error=access_denied' : '/login',
+      request.url
+    );
+    const response = NextResponse.redirect(redirectUrl);
+
+    if (result.status === 401 || result.status === 403) {
+      clearSessionCookies(response);
+    }
+
     return response;
   }
 

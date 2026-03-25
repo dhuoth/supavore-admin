@@ -1,17 +1,19 @@
-export const ADMIN_ROLES = new Set(['admin', 'super_admin']);
+export const ADMIN_ALLOWLIST = ['joeperez2k@gmail.com', 'derek.huoth@gmail.com'];
 export const SUPAVORE_ACCESS_TOKEN_COOKIE = 'supavore-access-token';
 export const SUPAVORE_REFRESH_TOKEN_COOKIE = 'supavore-refresh-token';
 
-type SupabaseUser = {
+export type SupabaseUser = {
   id: string;
   email?: string | null;
+  user_metadata?: {
+    full_name?: string | null;
+  } | null;
 };
 
 type AdminAuthResult =
   | {
       ok: true;
       user: SupabaseUser;
-      role: string;
       refreshedSession: {
         accessToken: string;
         refreshToken: string;
@@ -46,11 +48,24 @@ function getSupabasePublicConfig() {
   };
 }
 
-function isAdminRole(role: string | null | undefined) {
-  return Boolean(role && ADMIN_ROLES.has(role));
+export function normalizeAdminEmail(email: string | null | undefined) {
+  return email?.trim().toLowerCase() ?? '';
 }
 
-async function getSupabaseUser(accessToken: string): Promise<SupabaseUser | null> {
+export function isAdminAllowlistedEmail(email: string | null | undefined) {
+  const normalizedEmail = normalizeAdminEmail(email);
+
+  return (
+    normalizedEmail.length > 0 &&
+    ADMIN_ALLOWLIST.some((allowedEmail) => normalizeAdminEmail(allowedEmail) === normalizedEmail)
+  );
+}
+
+export function isAdminAllowlistedUser(user: SupabaseUser | null | undefined) {
+  return isAdminAllowlistedEmail(user?.email);
+}
+
+export async function getSupabaseUser(accessToken: string): Promise<SupabaseUser | null> {
   const { supabaseUrl, supabaseAnonKey } = getSupabasePublicConfig();
   const response = await fetch(`${supabaseUrl}/auth/v1/user`, {
     headers: {
@@ -65,27 +80,6 @@ async function getSupabaseUser(accessToken: string): Promise<SupabaseUser | null
   }
 
   return (await response.json()) as SupabaseUser;
-}
-
-async function getProfileRole(accessToken: string, userId: string): Promise<string | null> {
-  const { supabaseUrl, supabaseAnonKey } = getSupabasePublicConfig();
-  const response = await fetch(
-    `${supabaseUrl}/rest/v1/profiles?select=role&id=eq.${encodeURIComponent(userId)}&limit=1`,
-    {
-      headers: {
-        apikey: supabaseAnonKey,
-        Authorization: `Bearer ${accessToken}`,
-      },
-      cache: 'no-store',
-    }
-  );
-
-  if (!response.ok) {
-    return null;
-  }
-
-  const payload = (await response.json()) as Array<{ role?: string | null }>;
-  return payload[0]?.role ?? null;
 }
 
 async function refreshSupabaseSession(refreshToken: string) {
@@ -132,19 +126,15 @@ async function resolveAdminUser(accessToken: string) {
     return null;
   }
 
-  const role = await getProfileRole(accessToken, user.id);
-
-  if (!isAdminRole(role)) {
+  if (!isAdminAllowlistedUser(user)) {
     return {
       user,
-      role,
       authorized: false as const,
     };
   }
 
   return {
     user,
-    role,
     authorized: true as const,
   };
 }
@@ -163,7 +153,6 @@ export async function authenticateAdminSession(params: {
       return {
         ok: true,
         user: resolvedAdmin.user,
-        role: resolvedAdmin.role ?? 'admin',
         refreshedSession: null,
       };
     }
@@ -212,7 +201,6 @@ export async function authenticateAdminSession(params: {
   return {
     ok: true,
     user: refreshedAdmin.user,
-    role: refreshedAdmin.role ?? 'admin',
     refreshedSession: {
       accessToken: refreshedSession.accessToken,
       refreshToken: refreshedSession.refreshToken,

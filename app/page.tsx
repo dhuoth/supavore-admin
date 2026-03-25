@@ -3,6 +3,7 @@
 import Link from 'next/link';
 import { useEffect, useState } from 'react';
 import { useRouter } from 'next/navigation';
+import { isAdminAllowlistedEmail } from '@/lib/adminAuth';
 import { supabase } from '@/lib/supabaseClient';
 
 export default function Home() {
@@ -20,14 +21,12 @@ export default function Home() {
         return;
       }
 
-      const { data: profile, error } = await supabase
-        .from('profiles')
-        .select('role')
-        .eq('id', user.id)
-        .single();
-
-      if (error || !profile || !['admin', 'super_admin'].includes(profile.role)) {
-        router.push('/login');
+      if (!isAdminAllowlistedEmail(user.email)) {
+        await supabase.auth.signOut();
+        await fetch('/api/auth/session', {
+          method: 'DELETE',
+        });
+        router.push('/login?error=access_denied');
         return;
       }
 
