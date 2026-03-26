@@ -105,55 +105,35 @@ export default async function UsersAdminPage({ searchParams }: PageProps) {
   try {
     const supabaseAdmin = createSupabaseAdminClient();
     const authUsers = await listAllAuthUsers();
-    const userIds = authUsers.map((user) => user.id);
-    let profiles:
-      | Array<{
-          id: string;
-          email: string | null;
-          first_name: string | null;
-          role: string | null;
-        }>
-      | null = [];
+    const authUsersById = new Map(authUsers.map((user) => [user.id, user]));
+    const { data: profiles, error: profilesError } = await supabaseAdmin
+      .from('profiles')
+      .select('id, email, first_name, role');
 
-    if (userIds.length > 0) {
-      const { data: profileRows, error: profilesError } = await supabaseAdmin
-        .from('profiles')
-        .select('id, email, first_name, role')
-        .in('id', userIds);
-
-      if (profilesError) {
-        throw profilesError;
-      }
-
-      profiles = profileRows;
+    if (profilesError) {
+      throw profilesError;
     }
 
-    const profilesById = new Map(
-      (profiles ?? []).map((profile) => [
-        profile.id,
-        {
-          email: profile.email,
-          first_name: profile.first_name,
-          role: profile.role,
-        },
-      ])
-    );
-
-    rows = authUsers
-      .map((user) => {
-        const profile = profilesById.get(user.id);
+    rows = ((profiles ?? []) as Array<{
+      id: string;
+      email: string | null;
+      first_name: string | null;
+      role: string | null;
+    }>)
+      .map((profile) => {
+        const authUser = authUsersById.get(profile.id);
         const displayName =
-          formatCellValue(profile?.first_name) !== '—'
-            ? formatCellValue(profile?.first_name)
-            : formatCellValue(user.user_metadata?.full_name);
-        const role = isManageableProfileRole(profile?.role) ? profile.role : 'user';
+          formatCellValue(profile.first_name) !== '—'
+            ? formatCellValue(profile.first_name)
+            : formatCellValue(authUser?.user_metadata?.full_name);
+        const role = isManageableProfileRole(profile.role) ? profile.role : 'user';
 
         return {
-          id: user.id,
+          id: profile.id,
           displayName,
-          email: user.email?.trim() || profile?.email?.trim() || '—',
+          email: profile.email?.trim() || authUser?.email?.trim() || '—',
           role,
-          createdAt: user.created_at ?? null,
+          createdAt: authUser?.created_at ?? null,
         };
       })
       .filter((row) => {
@@ -183,7 +163,7 @@ export default async function UsersAdminPage({ searchParams }: PageProps) {
           <div className="space-y-2">
             <h1 className="text-4xl font-semibold tracking-tight text-zinc-950">Users</h1>
             <p className="max-w-2xl text-sm text-zinc-600 sm:text-base">
-              View Supavore users and manage admin roles.
+              View profile-backed Supavore users and manage admin roles.
             </p>
           </div>
         </div>

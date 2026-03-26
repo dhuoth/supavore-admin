@@ -43,6 +43,14 @@ export async function POST(request: Request) {
 
   const supabaseAdmin = createSupabaseAdminClient();
   const targetProfile = await getAdminProfileByUserId(userId);
+
+  if (!targetProfile) {
+    return NextResponse.json(
+      { error: 'User profile not found. Refresh the page and try again.' },
+      { status: 404 }
+    );
+  }
+
   const targetCurrentRole = isManageableProfileRole(targetProfile?.role) ? targetProfile.role : 'user';
 
   if (targetCurrentRole === 'super_admin' && role !== 'super_admin') {
@@ -63,33 +71,13 @@ export async function POST(request: Request) {
     }
   }
 
-  const { data: authUserResult, error: authUserError } = await supabaseAdmin.auth.admin.getUserById(
-    userId
-  );
+  const { error: updateError } = await supabaseAdmin
+    .from('profiles')
+    .update({ role })
+    .eq('id', userId);
 
-  if (authUserError || !authUserResult.user) {
-    return NextResponse.json({ error: 'User not found.' }, { status: 404 });
-  }
-
-  const firstName =
-    targetProfile?.first_name?.trim() ||
-    authUserResult.user.user_metadata?.full_name?.toString().trim() ||
-    '';
-
-  const { error: upsertError } = await supabaseAdmin.from('profiles').upsert(
-    {
-      id: userId,
-      email: authUserResult.user.email ?? null,
-      first_name: firstName,
-      role,
-    },
-    {
-      onConflict: 'id',
-    }
-  );
-
-  if (upsertError) {
-    return NextResponse.json({ error: upsertError.message }, { status: 500 });
+  if (updateError) {
+    return NextResponse.json({ error: updateError.message }, { status: 500 });
   }
 
   return NextResponse.json({ ok: true });
