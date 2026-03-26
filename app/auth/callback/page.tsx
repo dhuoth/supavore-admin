@@ -2,7 +2,6 @@
 
 import { useEffect } from 'react';
 import { useRouter } from 'next/navigation';
-import { isAdminAllowlistedEmail } from '@/lib/adminAuth';
 import { supabase } from '@/lib/supabaseClient';
 
 export default function AuthCallback() {
@@ -31,15 +30,6 @@ export default function AuthCallback() {
           method: 'DELETE',
         });
         router.push('/login');
-        return;
-      }
-
-      if (!isAdminAllowlistedEmail(user.email)) {
-        await supabase.auth.signOut();
-        await fetch('/api/auth/session', {
-          method: 'DELETE',
-        });
-        router.push('/login?error=access_denied');
         return;
       }
 

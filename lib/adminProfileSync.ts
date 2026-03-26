@@ -1,17 +1,29 @@
 import 'server-only';
 
-import { isAdminAllowlistedUser, type SupabaseUser } from '@/lib/adminAuth';
+import {
+  isAdminAllowlistedUser,
+  isManageableProfileRole,
+  type ProfileRole,
+  type SupabaseUser,
+} from '@/lib/adminAuth';
 import { createSupabaseAdminClient } from '@/lib/supabaseAdmin';
 
 type ExistingProfileRow = {
   id: string;
+  email: string | null;
   first_name: string | null;
+  role: string | null;
   dietary_needs: string[] | null;
 };
 
-export async function syncAllowlistedAdminProfile(user: SupabaseUser) {
-  if (!user.email || !isAdminAllowlistedUser(user)) {
-    throw new Error('Cannot sync a profile for a non-allowlisted user.');
+export async function syncAdminProfile(
+  user: SupabaseUser,
+  options?: {
+    bootstrapRole?: ProfileRole | null;
+  }
+) {
+  if (!user.email) {
+    throw new Error('Cannot sync a profile without an email address.');
   }
 
   console.info('[admin-profile-sync] start', {
@@ -22,7 +34,7 @@ export async function syncAllowlistedAdminProfile(user: SupabaseUser) {
   const supabaseAdmin = createSupabaseAdminClient();
   const { data: existingProfile, error: existingProfileError } = await supabaseAdmin
     .from('profiles')
-    .select('id, first_name, dietary_needs')
+    .select('id, email, first_name, role, dietary_needs')
     .eq('id', user.id)
     .maybeSingle();
 
@@ -35,18 +47,28 @@ export async function syncAllowlistedAdminProfile(user: SupabaseUser) {
       ? existingProfile.first_name
       : user.user_metadata?.full_name?.trim() || '';
 
+  const fallbackBootstrapRole =
+    options?.bootstrapRole ??
+    (isAdminAllowlistedUser(user) ? ('admin' as const) : null);
+  const resolvedRole = isManageableProfileRole(existingProfile?.role)
+    ? existingProfile.role
+    : fallbackBootstrapRole;
+
   const profilePayload: {
     id: string;
     email: string;
-    role: 'admin';
     first_name: string;
+    role?: ProfileRole;
     dietary_needs?: string[] | null;
   } = {
     id: user.id,
     email: user.email,
-    role: 'admin',
     first_name: resolvedFirstName,
   };
+
+  if (resolvedRole) {
+    profilePayload.role = resolvedRole;
+  }
 
   if (existingProfile) {
     profilePayload.dietary_needs = existingProfile.dietary_needs;

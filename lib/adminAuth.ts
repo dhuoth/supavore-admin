@@ -1,6 +1,15 @@
+import 'server-only';
+
+import { createSupabaseAdminClient } from '@/lib/supabaseAdmin';
+
 export const ADMIN_ALLOWLIST = ['joeperez2k@gmail.com', 'derek.huoth@gmail.com'];
 export const SUPAVORE_ACCESS_TOKEN_COOKIE = 'supavore-access-token';
 export const SUPAVORE_REFRESH_TOKEN_COOKIE = 'supavore-refresh-token';
+export const ADMIN_ROLES = ['admin', 'super_admin'] as const;
+export const MANAGEABLE_PROFILE_ROLES = ['user', 'admin', 'super_admin'] as const;
+
+export type AdminRole = (typeof ADMIN_ROLES)[number];
+export type ProfileRole = (typeof MANAGEABLE_PROFILE_ROLES)[number];
 
 export type SupabaseUser = {
   id: string;
@@ -10,10 +19,18 @@ export type SupabaseUser = {
   } | null;
 };
 
+export type AdminProfileRow = {
+  id: string;
+  email: string | null;
+  first_name: string | null;
+  role: string | null;
+};
+
 type AdminAuthResult =
   | {
       ok: true;
       user: SupabaseUser;
+      role: AdminRole;
       refreshedSession: {
         accessToken: string;
         refreshToken: string;
@@ -63,6 +80,60 @@ export function isAdminAllowlistedEmail(email: string | null | undefined) {
 
 export function isAdminAllowlistedUser(user: SupabaseUser | null | undefined) {
   return isAdminAllowlistedEmail(user?.email);
+}
+
+export function isAdminRole(role: string | null | undefined): role is AdminRole {
+  return ADMIN_ROLES.includes(role as AdminRole);
+}
+
+export function isManageableProfileRole(role: string | null | undefined): role is ProfileRole {
+  return MANAGEABLE_PROFILE_ROLES.includes(role as ProfileRole);
+}
+
+export async function getAdminProfileByUserId(userId: string) {
+  const supabaseAdmin = createSupabaseAdminClient();
+  const { data, error } = await supabaseAdmin
+    .from('profiles')
+    .select('id, email, first_name, role')
+    .eq('id', userId)
+    .maybeSingle();
+
+  if (error) {
+    throw error;
+  }
+
+  return (data ?? null) as AdminProfileRow | null;
+}
+
+export async function resolveAdminAccessForUser(user: SupabaseUser) {
+  const profile = await getAdminProfileByUserId(user.id);
+  const profileRole = profile?.role ?? null;
+
+  if (isAdminRole(profileRole)) {
+    return {
+      user,
+      profile,
+      role: profileRole,
+      authorized: true as const,
+    };
+  }
+
+  if (isAdminAllowlistedUser(user)) {
+    return {
+      user,
+      profile,
+      role: 'admin' as const,
+      authorized: true as const,
+      bootstrapAllowlist: true as const,
+    };
+  }
+
+  return {
+    user,
+    profile,
+    role: null,
+    authorized: false as const,
+  };
 }
 
 export async function getSupabaseUser(accessToken: string): Promise<SupabaseUser | null> {
@@ -126,17 +197,7 @@ async function resolveAdminUser(accessToken: string) {
     return null;
   }
 
-  if (!isAdminAllowlistedUser(user)) {
-    return {
-      user,
-      authorized: false as const,
-    };
-  }
-
-  return {
-    user,
-    authorized: true as const,
-  };
+  return resolveAdminAccessForUser(user);
 }
 
 export async function authenticateAdminSession(params: {
@@ -153,6 +214,7 @@ export async function authenticateAdminSession(params: {
       return {
         ok: true,
         user: resolvedAdmin.user,
+        role: resolvedAdmin.role,
         refreshedSession: null,
       };
     }
@@ -201,6 +263,7 @@ export async function authenticateAdminSession(params: {
   return {
     ok: true,
     user: refreshedAdmin.user,
+    role: refreshedAdmin.role,
     refreshedSession: {
       accessToken: refreshedSession.accessToken,
       refreshToken: refreshedSession.refreshToken,

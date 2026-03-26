@@ -1,54 +1,29 @@
-'use client';
-
+import { cookies } from 'next/headers';
 import Link from 'next/link';
-import { useEffect, useState } from 'react';
-import { useRouter } from 'next/navigation';
-import { isAdminAllowlistedEmail } from '@/lib/adminAuth';
-import { supabase } from '@/lib/supabaseClient';
+import { redirect } from 'next/navigation';
+import {
+  SUPAVORE_ACCESS_TOKEN_COOKIE,
+  SUPAVORE_REFRESH_TOKEN_COOKIE,
+  authenticateAdminSession,
+} from '@/lib/adminAuth';
 
-export default function Home() {
-  const router = useRouter();
-  const [loading, setLoading] = useState(true);
+export default async function Home() {
+  const cookieStore = await cookies();
+  const authResult = await authenticateAdminSession({
+    accessToken: cookieStore.get(SUPAVORE_ACCESS_TOKEN_COOKIE)?.value,
+    refreshToken: cookieStore.get(SUPAVORE_REFRESH_TOKEN_COOKIE)?.value,
+  });
 
-  useEffect(() => {
-    const checkAccess = async () => {
-      const {
-        data: { user },
-      } = await supabase.auth.getUser();
-
-      if (!user) {
-        router.push('/login');
-        return;
-      }
-
-      if (!isAdminAllowlistedEmail(user.email)) {
-        await supabase.auth.signOut();
-        await fetch('/api/auth/session', {
-          method: 'DELETE',
-        });
-        router.push('/login?error=access_denied');
-        return;
-      }
-
-      setLoading(false);
-    };
-
-    checkAccess();
-  }, [router]);
-
-  if (loading) {
-    return (
-      <div className="flex h-screen items-center justify-center">
-        <p>Loading...</p>
-      </div>
-    );
+  if (!authResult.ok) {
+    redirect('/login');
   }
 
   const sections = [
     { label: 'Menu Database', href: '/admin/menu' },
-    { label: 'CSV Uploads', href: '/admin/csv' },
+    { label: 'CSV Upload', href: '/admin/csv' },
     { label: 'Dietary Signals', href: '/admin/dietary-signals' },
-    { label: 'Users' },
+    { label: 'Map', href: '/admin/map' },
+    { label: 'Users', href: '/admin/users' },
     { label: 'Coverage Requests', href: '/admin/coverage-requests' },
   ];
 
@@ -64,28 +39,19 @@ export default function Home() {
             Supavore Admin
           </h1>
           <p className="max-w-2xl text-sm text-zinc-600 sm:text-base">
-            Menu database, uploads, users, and map tools
+            Menu database, uploads, demand review, user access management, and coverage mapping.
           </p>
         </div>
 
         <section className="grid gap-4 sm:grid-cols-2 xl:grid-cols-4">
           {sections.map((section) => (
-            section.href ? (
-              <Link
-                key={section.label}
-                href={section.href}
-                className="rounded-2xl border border-zinc-200 bg-white p-5 shadow-sm transition hover:border-zinc-300 hover:bg-zinc-50 focus:outline-none focus:ring-2 focus:ring-zinc-200"
-              >
-                <h2 className="text-base font-medium text-zinc-900">{section.label}</h2>
-              </Link>
-            ) : (
-              <div
-                key={section.label}
-                className="rounded-2xl border border-zinc-200 bg-white p-5 shadow-sm"
-              >
-                <h2 className="text-base font-medium text-zinc-900">{section.label}</h2>
-              </div>
-            )
+            <Link
+              key={section.label}
+              href={section.href}
+              className="rounded-2xl border border-zinc-200 bg-white p-5 shadow-sm transition hover:border-zinc-300 hover:bg-zinc-50 focus:outline-none focus:ring-2 focus:ring-zinc-200"
+            >
+              <h2 className="text-base font-medium text-zinc-900">{section.label}</h2>
+            </Link>
           ))}
         </section>
       </div>

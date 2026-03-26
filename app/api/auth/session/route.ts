@@ -4,9 +4,9 @@ import {
   SUPAVORE_ACCESS_TOKEN_COOKIE,
   SUPAVORE_REFRESH_TOKEN_COOKIE,
   getSupabaseUser,
-  isAdminAllowlistedUser,
+  resolveAdminAccessForUser,
 } from '@/lib/adminAuth';
-import { syncAllowlistedAdminProfile } from '@/lib/adminProfileSync';
+import { syncAdminProfile } from '@/lib/adminProfileSync';
 
 function buildCookieOptions(expiresAt?: number | null) {
   return {
@@ -42,15 +42,16 @@ export async function POST(request: Request) {
     return NextResponse.json({ error: 'Invalid session tokens.' }, { status: 401 });
   }
 
-  const isAllowlisted = isAdminAllowlistedUser(user);
+  const resolvedAdmin = await resolveAdminAccessForUser(user);
   console.info('[admin-session] resolved user', {
     userId: user.id,
     email: user.email ?? null,
-    isAllowlisted,
+    authorized: resolvedAdmin.authorized,
+    role: resolvedAdmin.authorized ? resolvedAdmin.role : null,
   });
 
-  if (!isAllowlisted) {
-    console.warn('[admin-session] allowlist rejected user', {
+  if (!resolvedAdmin.authorized) {
+    console.warn('[admin-session] admin authorization rejected user', {
       userId: user.id,
       email: user.email ?? null,
     });
@@ -62,7 +63,10 @@ export async function POST(request: Request) {
       userId: user.id,
       email: user.email ?? null,
     });
-    await syncAllowlistedAdminProfile(user);
+    await syncAdminProfile(user, {
+      bootstrapRole:
+        resolvedAdmin.authorized && 'bootstrapAllowlist' in resolvedAdmin ? resolvedAdmin.role : null,
+    });
     console.info('[admin-session] after syncAllowlistedAdminProfile', {
       userId: user.id,
       email: user.email ?? null,
