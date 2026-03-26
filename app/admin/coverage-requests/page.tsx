@@ -5,6 +5,7 @@ import {
   SUPAVORE_ACCESS_TOKEN_COOKIE,
   SUPAVORE_REFRESH_TOKEN_COOKIE,
 } from '@/lib/adminAuth';
+import { formatAdminTimestamp } from '@/lib/adminTimestamp';
 import { createSupabaseAdminClient } from '@/lib/supabaseAdmin';
 
 type CoverageRequestRow = {
@@ -34,10 +35,7 @@ function formatCellValue(value: string | null) {
 }
 
 function formatCreatedAt(value: string) {
-  return new Intl.DateTimeFormat('en-US', {
-    dateStyle: 'medium',
-    timeStyle: 'short',
-  }).format(new Date(value));
+  return formatAdminTimestamp(value);
 }
 
 function formatCoordinates(latitude: number | null, longitude: number | null) {

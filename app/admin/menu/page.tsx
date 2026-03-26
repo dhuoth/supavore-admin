@@ -1,6 +1,7 @@
 'use client';
 
 import { FormEvent, useEffect, useRef, useState } from 'react';
+import { formatAdminTimestamp } from '@/lib/adminTimestamp';
 import { geocodeRestaurantLocationViaApi } from '@/lib/geocodingClient';
 import {
   canonicalizeDietaryCompliance,
@@ -1756,7 +1757,7 @@ export default function MenuDatabasePage() {
         <div>
           <p className="text-xs text-zinc-500">Created At</p>
           <p className="text-sm text-zinc-700">
-            {new Date(selectedMenuItem.created_at).toLocaleString()}
+            {formatAdminTimestamp(selectedMenuItem.created_at)}
           </p>
         </div>
 
@@ -1764,7 +1765,7 @@ export default function MenuDatabasePage() {
           <p className="text-xs text-zinc-500">Last Updated</p>
           <p className="text-sm text-zinc-700">
             {selectedMenuItem.updated_at
-              ? new Date(selectedMenuItem.updated_at).toLocaleString()
+              ? formatAdminTimestamp(selectedMenuItem.updated_at)
               : '—'}
           </p>
         </div>
