@@ -7,12 +7,14 @@ import {
 } from '@/lib/adminAuth';
 import { createSupabaseAdminClient } from '@/lib/supabaseAdmin';
 
-type DietarySignalRow = {
+type CoverageRequestRow = {
   created_at: string;
-  dietary_needs: string[] | null;
+  first_name: string | null;
   city: string | null;
   region: string | null;
   postal_code: string | null;
+  latitude: number | null;
+  longitude: number | null;
   source: string | null;
   user_id: string | null;
 };
@@ -22,14 +24,6 @@ type SearchParams = Record<string, string | string[] | undefined>;
 type PageProps = {
   searchParams?: Promise<SearchParams>;
 };
-
-function formatDietaryNeeds(dietaryNeeds: string[] | null) {
-  if (!Array.isArray(dietaryNeeds) || dietaryNeeds.length === 0) {
-    return 'None';
-  }
-
-  return dietaryNeeds.join(', ');
-}
 
 function formatCellValue(value: string | null) {
   if (!value || value.trim().length === 0) {
@@ -46,10 +40,15 @@ function formatCreatedAt(value: string) {
   }).format(new Date(value));
 }
 
-function getSearchParamValue(
-  searchParams: SearchParams,
-  key: string
-) {
+function formatCoordinates(latitude: number | null, longitude: number | null) {
+  if (latitude === null || longitude === null) {
+    return '—';
+  }
+
+  return `${latitude.toFixed(4)}, ${longitude.toFixed(4)}`;
+}
+
+function getSearchParamValue(searchParams: SearchParams, key: string) {
   const value = searchParams[key];
 
   if (Array.isArray(value)) {
@@ -89,21 +88,9 @@ function isWithinDateRange(value: string, startDate: string, endDate: string) {
   return true;
 }
 
-function buildDietaryNeedCounts(signals: DietarySignalRow[]) {
-  return signals.reduce<Record<string, number>>((counts, signal) => {
-    const dietaryNeeds = Array.isArray(signal.dietary_needs) ? signal.dietary_needs : [];
-
-    for (const dietaryNeed of dietaryNeeds) {
-      counts[dietaryNeed] = (counts[dietaryNeed] ?? 0) + 1;
-    }
-
-    return counts;
-  }, {});
-}
-
-function buildCityCounts(signals: DietarySignalRow[]) {
-  return signals.reduce<Record<string, number>>((counts, signal) => {
-    const city = signal.city?.trim();
+function buildCityCounts(requests: CoverageRequestRow[]) {
+  return requests.reduce<Record<string, number>>((counts, request) => {
+    const city = request.city?.trim();
 
     if (!city) {
       return counts;
@@ -114,11 +101,24 @@ function buildCityCounts(signals: DietarySignalRow[]) {
   }, {});
 }
 
+function buildPostalCodeCounts(requests: CoverageRequestRow[]) {
+  return requests.reduce<Record<string, number>>((counts, request) => {
+    const postalCode = request.postal_code?.trim();
+
+    if (!postalCode) {
+      return counts;
+    }
+
+    counts[postalCode] = (counts[postalCode] ?? 0) + 1;
+    return counts;
+  }, {});
+}
+
 function sortEntriesByCount(entries: Array<[string, number]>) {
   return entries.sort((left, right) => right[1] - left[1] || left[0].localeCompare(right[0]));
 }
 
-export default async function DietarySignalsPage({ searchParams }: PageProps) {
+export default async function CoverageRequestsPage({ searchParams }: PageProps) {
   const cookieStore = await cookies();
   const authResult = await authenticateAdminSession({
     accessToken: cookieStore.get(SUPAVORE_ACCESS_TOKEN_COOKIE)?.value,
@@ -130,71 +130,63 @@ export default async function DietarySignalsPage({ searchParams }: PageProps) {
   }
 
   const resolvedSearchParams = (await searchParams) ?? {};
-  const dietaryNeedFilter = getSearchParamValue(resolvedSearchParams, 'dietary_need');
   const cityFilter = getSearchParamValue(resolvedSearchParams, 'city');
+  const postalCodeFilter = getSearchParamValue(resolvedSearchParams, 'postal_code');
   const startDate = getSearchParamValue(resolvedSearchParams, 'start');
   const endDate = getSearchParamValue(resolvedSearchParams, 'end');
   const sortBy = getSearchParamValue(resolvedSearchParams, 'sort') || 'newest';
 
   const supabaseAdmin = createSupabaseAdminClient();
   const { data, error } = await supabaseAdmin
-    .from('dietary_request_signals')
+    .from('coverage_requests')
     .select(
-      'created_at, dietary_needs, city, region, postal_code, source, user_id'
+      'created_at, first_name, city, region, postal_code, latitude, longitude, source, user_id'
     )
     .order('created_at', { ascending: false });
 
   if (error) {
-    throw new Error(`Failed to load dietary signals: ${error.message}`);
+    throw new Error(`Failed to load coverage requests: ${error.message}`);
   }
 
-  const signals = (data ?? []) as DietarySignalRow[];
-  const availableDietaryNeeds = Array.from(
-    new Set(
-      signals.flatMap((signal) =>
-        Array.isArray(signal.dietary_needs) ? signal.dietary_needs : []
-      )
-    )
-  ).sort((left, right) => left.localeCompare(right));
+  const requests = (data ?? []) as CoverageRequestRow[];
+  const filteredRequests = requests.filter((request) => {
+    if (cityFilter && !normalizeText(request.city).includes(normalizeText(cityFilter))) {
+      return false;
+    }
 
-  const filteredSignals = signals.filter((signal) => {
     if (
-      dietaryNeedFilter &&
-      !(Array.isArray(signal.dietary_needs) && signal.dietary_needs.includes(dietaryNeedFilter))
+      postalCodeFilter &&
+      !normalizeText(request.postal_code).includes(normalizeText(postalCodeFilter))
     ) {
       return false;
     }
 
-    if (cityFilter && !normalizeText(signal.city).includes(normalizeText(cityFilter))) {
-      return false;
-    }
-
-    if ((startDate || endDate) && !isWithinDateRange(signal.created_at, startDate, endDate)) {
+    if ((startDate || endDate) && !isWithinDateRange(request.created_at, startDate, endDate)) {
       return false;
     }
 
     return true;
   });
 
-  const dietaryNeedCounts = buildDietaryNeedCounts(filteredSignals);
-  const cityCounts = buildCityCounts(filteredSignals);
-  const topDietaryNeeds = sortEntriesByCount(Object.entries(dietaryNeedCounts)).slice(0, 5);
+  const cityCounts = buildCityCounts(filteredRequests);
+  const postalCodeCounts = buildPostalCodeCounts(filteredRequests);
   const topCities = sortEntriesByCount(Object.entries(cityCounts)).slice(0, 5);
+  const topPostalCodes = sortEntriesByCount(Object.entries(postalCodeCounts)).slice(0, 5);
+  const requestsWithCoordinates = filteredRequests.filter(
+    (request) => request.latitude !== null && request.longitude !== null
+  ).length;
 
-  const sortedSignals = [...filteredSignals].sort((left, right) => {
-    if (sortBy === 'dietary_popularity') {
-      const leftScore = (Array.isArray(left.dietary_needs) ? left.dietary_needs : []).reduce(
-        (total, dietaryNeed) => total + (dietaryNeedCounts[dietaryNeed] ?? 0),
-        0
-      );
-      const rightScore = (Array.isArray(right.dietary_needs) ? right.dietary_needs : []).reduce(
-        (total, dietaryNeed) => total + (dietaryNeedCounts[dietaryNeed] ?? 0),
-        0
-      );
+  const sortedRequests = [...filteredRequests].sort((left, right) => {
+    if (sortBy === 'city_popularity') {
+      const leftCity = left.city?.trim() ?? '';
+      const rightCity = right.city?.trim() ?? '';
+      const leftScore = leftCity ? (cityCounts[leftCity] ?? 0) : 0;
+      const rightScore = rightCity ? (cityCounts[rightCity] ?? 0) : 0;
 
       return (
         rightScore - leftScore ||
-        new Date(right.created_at).getTime() - new Date(left.created_at).getTime()
+        new Date(right.created_at).getTime() - new Date(left.created_at).getTime() ||
+        leftCity.localeCompare(rightCity)
       );
     }
 
@@ -206,42 +198,24 @@ export default async function DietarySignalsPage({ searchParams }: PageProps) {
       <div className="mx-auto flex w-full max-w-7xl flex-col gap-8">
         <div className="space-y-3">
           <span className="w-fit rounded-full border border-zinc-200 bg-white px-3 py-1 text-xs font-medium tracking-wide text-zinc-600">
-            Dietary demand review
+            Coverage demand review
           </span>
           <div className="space-y-2">
             <h1 className="text-4xl font-semibold tracking-tight text-zinc-950">
-              Dietary Signals
+              Coverage Requests
             </h1>
             <p className="max-w-2xl text-sm text-zinc-600 sm:text-base">
-              Review unmet dietary demand coming from the mobile app.
+              Review no-coverage requests coming from the mobile app.
             </p>
           </div>
         </div>
 
-        <section className="grid gap-4 lg:grid-cols-3">
+        <section className="grid gap-4 lg:grid-cols-4">
           <div className="rounded-2xl border border-zinc-200 bg-white p-5 shadow-sm">
-            <p className="text-sm text-zinc-500">Total signals</p>
+            <p className="text-sm text-zinc-500">Total requests</p>
             <p className="mt-2 text-3xl font-semibold text-zinc-950">
-              {filteredSignals.length}
+              {filteredRequests.length}
             </p>
-          </div>
-
-          <div className="rounded-2xl border border-zinc-200 bg-white p-5 shadow-sm">
-            <p className="text-sm text-zinc-500">Top dietary needs</p>
-            <div className="mt-3 flex flex-wrap gap-2">
-              {topDietaryNeeds.length > 0 ? (
-                topDietaryNeeds.map(([dietaryNeed, count]) => (
-                  <span
-                    key={dietaryNeed}
-                    className="rounded-full bg-zinc-100 px-3 py-1 text-sm text-zinc-700"
-                  >
-                    {dietaryNeed} ({count})
-                  </span>
-                ))
-              ) : (
-                <span className="text-sm text-zinc-500">No signals yet</span>
-              )}
-            </div>
           </div>
 
           <div className="rounded-2xl border border-zinc-200 bg-white p-5 shadow-sm">
@@ -261,32 +235,35 @@ export default async function DietarySignalsPage({ searchParams }: PageProps) {
               )}
             </div>
           </div>
+
+          <div className="rounded-2xl border border-zinc-200 bg-white p-5 shadow-sm">
+            <p className="text-sm text-zinc-500">Top postal codes</p>
+            <div className="mt-3 flex flex-wrap gap-2">
+              {topPostalCodes.length > 0 ? (
+                topPostalCodes.map(([postalCode, count]) => (
+                  <span
+                    key={postalCode}
+                    className="rounded-full bg-zinc-100 px-3 py-1 text-sm text-zinc-700"
+                  >
+                    {postalCode} ({count})
+                  </span>
+                ))
+              ) : (
+                <span className="text-sm text-zinc-500">No postal code data yet</span>
+              )}
+            </div>
+          </div>
+
+          <div className="rounded-2xl border border-zinc-200 bg-white p-5 shadow-sm">
+            <p className="text-sm text-zinc-500">Requests with coordinates</p>
+            <p className="mt-2 text-3xl font-semibold text-zinc-950">
+              {requestsWithCoordinates}
+            </p>
+          </div>
         </section>
 
         <section className="rounded-2xl border border-zinc-200 bg-white p-5 shadow-sm">
           <form className="grid gap-4 md:grid-cols-2 xl:grid-cols-5">
-            <div className="space-y-2">
-              <label
-                htmlFor="dietary-need-filter"
-                className="text-sm font-medium text-zinc-700"
-              >
-                Dietary need
-              </label>
-              <select
-                id="dietary-need-filter"
-                name="dietary_need"
-                defaultValue={dietaryNeedFilter}
-                className="w-full rounded-xl border border-zinc-200 bg-white px-3 py-2 text-sm text-zinc-900 outline-none focus:border-zinc-400 focus:ring-2 focus:ring-zinc-200"
-              >
-                <option value="">All dietary needs</option>
-                {availableDietaryNeeds.map((dietaryNeed) => (
-                  <option key={dietaryNeed} value={dietaryNeed}>
-                    {dietaryNeed}
-                  </option>
-                ))}
-              </select>
-            </div>
-
             <div className="space-y-2">
               <label htmlFor="city-filter" className="text-sm font-medium text-zinc-700">
                 City
@@ -297,6 +274,20 @@ export default async function DietarySignalsPage({ searchParams }: PageProps) {
                 type="text"
                 defaultValue={cityFilter}
                 placeholder="Filter by city"
+                className="w-full rounded-xl border border-zinc-200 bg-white px-3 py-2 text-sm text-zinc-900 outline-none placeholder:text-zinc-400 focus:border-zinc-400 focus:ring-2 focus:ring-zinc-200"
+              />
+            </div>
+
+            <div className="space-y-2">
+              <label htmlFor="postal-code-filter" className="text-sm font-medium text-zinc-700">
+                Postal code
+              </label>
+              <input
+                id="postal-code-filter"
+                name="postal_code"
+                type="text"
+                defaultValue={postalCodeFilter}
+                placeholder="Filter by postal code"
                 className="w-full rounded-xl border border-zinc-200 bg-white px-3 py-2 text-sm text-zinc-900 outline-none placeholder:text-zinc-400 focus:border-zinc-400 focus:ring-2 focus:ring-zinc-200"
               />
             </div>
@@ -338,7 +329,7 @@ export default async function DietarySignalsPage({ searchParams }: PageProps) {
                 className="w-full rounded-xl border border-zinc-200 bg-white px-3 py-2 text-sm text-zinc-900 outline-none focus:border-zinc-400 focus:ring-2 focus:ring-zinc-200"
               >
                 <option value="newest">Newest first</option>
-                <option value="dietary_popularity">Most requested dietary needs</option>
+                <option value="city_popularity">Most requested cities</option>
               </select>
             </div>
 
@@ -350,7 +341,7 @@ export default async function DietarySignalsPage({ searchParams }: PageProps) {
                 Apply filters
               </button>
               <a
-                href="/admin/dietary-signals"
+                href="/admin/coverage-requests"
                 className="rounded-xl border border-zinc-200 px-4 py-2 text-sm font-medium text-zinc-700 transition hover:bg-zinc-50"
               >
                 Reset
@@ -368,7 +359,7 @@ export default async function DietarySignalsPage({ searchParams }: PageProps) {
                     Created At
                   </th>
                   <th className="px-4 py-3 text-left font-medium text-zinc-600">
-                    Dietary Needs
+                    First Name
                   </th>
                   <th className="px-4 py-3 text-left font-medium text-zinc-600">
                     City
@@ -383,44 +374,52 @@ export default async function DietarySignalsPage({ searchParams }: PageProps) {
                     Source
                   </th>
                   <th className="px-4 py-3 text-left font-medium text-zinc-600">
+                    Coordinates
+                  </th>
+                  <th className="px-4 py-3 text-left font-medium text-zinc-600">
                     User ID
                   </th>
                 </tr>
               </thead>
               <tbody className="divide-y divide-zinc-100">
-                {sortedSignals.length > 0 ? (
-                  sortedSignals.map((signal) => (
-                    <tr key={`${signal.user_id ?? 'anonymous'}-${signal.created_at}`}>
+                {sortedRequests.length > 0 ? (
+                  sortedRequests.map((request) => (
+                    <tr
+                      key={`${request.user_id ?? 'anonymous'}-${request.created_at}-${request.postal_code ?? 'no-postal'}`}
+                    >
                       <td className="whitespace-nowrap px-4 py-3 text-zinc-700">
-                        {formatCreatedAt(signal.created_at)}
+                        {formatCreatedAt(request.created_at)}
                       </td>
                       <td className="px-4 py-3 text-zinc-700">
-                        {formatDietaryNeeds(signal.dietary_needs)}
+                        {formatCellValue(request.first_name)}
                       </td>
                       <td className="px-4 py-3 text-zinc-700">
-                        {formatCellValue(signal.city)}
+                        {formatCellValue(request.city)}
                       </td>
                       <td className="px-4 py-3 text-zinc-700">
-                        {formatCellValue(signal.region)}
+                        {formatCellValue(request.region)}
                       </td>
                       <td className="px-4 py-3 text-zinc-700">
-                        {formatCellValue(signal.postal_code)}
+                        {formatCellValue(request.postal_code)}
                       </td>
                       <td className="px-4 py-3 text-zinc-700">
-                        {formatCellValue(signal.source)}
+                        {formatCellValue(request.source)}
+                      </td>
+                      <td className="whitespace-nowrap px-4 py-3 font-mono text-xs text-zinc-600">
+                        {formatCoordinates(request.latitude, request.longitude)}
                       </td>
                       <td className="px-4 py-3 font-mono text-xs text-zinc-600">
-                        {formatCellValue(signal.user_id)}
+                        {formatCellValue(request.user_id)}
                       </td>
                     </tr>
                   ))
                 ) : (
                   <tr>
                     <td
-                      colSpan={7}
+                      colSpan={8}
                       className="px-4 py-10 text-center text-sm text-zinc-500"
                     >
-                      No dietary demand signals match the current filters.
+                      No coverage requests match the current filters.
                     </td>
                   </tr>
                 )}

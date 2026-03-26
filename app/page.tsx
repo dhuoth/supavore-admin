@@ -44,13 +44,13 @@ export default function Home() {
     );
   }
 
- const sections = [
-  { label: 'Menu Database', href: '/admin/menu' },
-  { label: 'CSV Uploads', href: '/admin/csv' },
-  { label: 'Dietary Signals', href: '/admin/dietary-signals' },
-  { label: 'Users' },
-  { label: 'Map View' },
-];
+  const sections = [
+    { label: 'Menu Database', href: '/admin/menu' },
+    { label: 'CSV Uploads', href: '/admin/csv' },
+    { label: 'Dietary Signals', href: '/admin/dietary-signals' },
+    { label: 'Users' },
+    { label: 'Coverage Requests', href: '/admin/coverage-requests' },
+  ];
 
   return (
     <main className="min-h-screen bg-zinc-50 px-6 py-10 text-zinc-950 sm:px-10 lg:px-16">
