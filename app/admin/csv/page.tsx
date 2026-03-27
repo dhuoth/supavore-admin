@@ -1,9 +1,8 @@
 'use client';
 
-import { ChangeEvent, useState } from 'react';
+import { ChangeEvent, useRef, useState } from 'react';
 import { geocodeRestaurantLocationViaApi } from '@/lib/geocodingClient';
 import { buildMenuItemUpsert, buildRestaurantUpsert } from '@/lib/menuUpsertShapes';
-import { dedupeMenuRows } from '@/lib/menuDeduping';
 import {
   canonicalizeDietaryCompliance,
   normalizeMenuItemPayload,
@@ -12,6 +11,7 @@ import {
 } from '@/lib/menuNormalization';
 import { mergeRestaurantLocation } from '@/lib/restaurantLocation';
 import { supabase } from '@/lib/supabaseClient';
+import { buildMenuItemKey } from '@/lib/menuValidation';
 
 const csvHeaders = [
   'Restaurant Name',
@@ -31,6 +31,7 @@ const csvHeaders = [
 type UploadState = 'idle' | 'uploading' | 'success' | 'error';
 
 type NormalizedCsvRow = {
+  rowNumber: number;
   restaurant_name: string;
   restaurant_address: string;
   menu_item: string;
@@ -51,6 +52,25 @@ type NormalizedCsvRow = {
     ingredients: string | null;
     dietaryCompliance: string[] | string;
   };
+};
+
+type CsvSourceRow = {
+  rowNumber: number;
+  rawRecord: Record<string, string>;
+};
+
+type UploadRowRecord = {
+  id: string | number;
+  row_number: number;
+};
+
+type UploadRowOutcomeStatus = 'succeeded' | 'failed' | 'skipped_duplicate';
+
+type UploadSummary = {
+  status: 'completed' | 'completed_with_errors' | 'error';
+  succeededRows: number;
+  failedRows: number;
+  skippedRows: number;
 };
 
 function inputClassName() {
@@ -111,6 +131,130 @@ function buildRowRecord(headers: string[], values: string[]) {
     record[header] = values[index] ?? '';
     return record;
   }, {});
+}
+
+function getErrorMessage(error: unknown) {
+  if (error instanceof Error) {
+    return error.message;
+  }
+
+  if (typeof error === 'object' && error !== null && 'message' in error) {
+    const message = (error as { message?: unknown }).message;
+    if (typeof message === 'string') {
+      return message;
+    }
+  }
+
+  return JSON.stringify(error);
+}
+
+function normalizeCsvRow(rawRecord: Record<string, string>, rowNumber: number): NormalizedCsvRow {
+  const recommendedModification = rawRecord['Recommended Modification'];
+  const noModifications = normalizeOptionalText(recommendedModification) === null;
+  const canonicalDietaryCompliance = canonicalizeDietaryCompliance(
+    rawRecord['Dietary Need Compliance']
+  );
+
+  const restaurant = normalizeRestaurantPayload({
+    restaurantName: rawRecord['Restaurant Name'],
+    restaurantAddress: rawRecord['Restaurant Address'],
+    restaurantCity: rawRecord['City'],
+    restaurantRegion: rawRecord['Region'],
+    restaurantPostalCode: rawRecord['Postal Code'],
+    onlineOrderingLink: rawRecord['Online Ordering Link'],
+  });
+
+  const menuItem = normalizeMenuItemPayload({
+    menuItem: rawRecord['Menu Item'],
+    basePrice: rawRecord['Base Price'],
+    priceWithModification: rawRecord['Price with Modification'],
+    recommendedModification,
+    ingredients: rawRecord['Ingredients'],
+    dietaryCompliance: canonicalDietaryCompliance,
+    noModifications,
+  });
+  const recommendedModificationValue = noModifications
+    ? 'No Modifications'
+    : menuItem.recommendedModification;
+  const priceWithModificationValue = noModifications
+    ? menuItem.basePrice
+    : menuItem.priceWithModification;
+
+  if (!restaurant.name) {
+    throw new Error(`Row ${rowNumber}: Restaurant Name is required.`);
+  }
+
+  if (!restaurant.address && !restaurant.postalCode) {
+    throw new Error(`Row ${rowNumber}: Restaurant Address or Postal Code is required.`);
+  }
+
+  if (!menuItem.name) {
+    throw new Error(`Row ${rowNumber}: Menu Item is required.`);
+  }
+
+  if (menuItem.basePrice === null || priceWithModificationValue === null) {
+    throw new Error(`Row ${rowNumber}: Base Price and Price with Modification are required.`);
+  }
+
+  if (!menuItem.dietaryCompliance) {
+    throw new Error(`Row ${rowNumber}: Dietary Need Compliance is required.`);
+  }
+
+  if (!recommendedModificationValue) {
+    throw new Error(
+      `Row ${rowNumber}: Recommended Modification is required when No Modifications is not implied.`
+    );
+  }
+
+  return {
+    rowNumber,
+    restaurant_name: restaurant.name,
+    restaurant_address: restaurant.address || '',
+    menu_item: menuItem.name,
+    rawRecord,
+    restaurant,
+    menuItem: {
+      name: menuItem.name,
+      basePrice: menuItem.basePrice,
+      recommendedModification: recommendedModificationValue,
+      priceWithModification: priceWithModificationValue,
+      ingredients: menuItem.ingredients,
+      dietaryCompliance: menuItem.dietaryCompliance,
+    },
+  };
+}
+
+function summarizeUploadResults(params: {
+  succeededRows: number;
+  failedRows: number;
+  skippedRows: number;
+}): UploadSummary {
+  const { succeededRows, failedRows, skippedRows } = params;
+
+  if (succeededRows === 0) {
+    return {
+      status: 'error',
+      succeededRows,
+      failedRows,
+      skippedRows,
+    };
+  }
+
+  if (failedRows > 0 || skippedRows > 0) {
+    return {
+      status: 'completed_with_errors',
+      succeededRows,
+      failedRows,
+      skippedRows,
+    };
+  }
+
+  return {
+    status: 'completed',
+    succeededRows,
+    failedRows,
+    skippedRows,
+  };
 }
 
 async function upsertRestaurant(row: {
@@ -215,9 +359,18 @@ async function upsertRestaurant(row: {
 }
 
 export default function CsvUploadsPage() {
-  const [selectedFile, setSelectedFile] = useState<File | null>(null);
+  const fileInputRef = useRef<HTMLInputElement | null>(null);
+  const [selectedFileName, setSelectedFileName] = useState<string | null>(null);
   const [uploadState, setUploadState] = useState<UploadState>('idle');
   const [statusMessage, setStatusMessage] = useState('No file selected.');
+
+  const clearSelectedFile = () => {
+    if (fileInputRef.current) {
+      fileInputRef.current.value = '';
+    }
+
+    setSelectedFileName(null);
+  };
 
   const handleDownloadTemplate = () => {
     const blob = new Blob([`${csvHeaders.join(',')}\n`], { type: 'text/csv;charset=utf-8' });
@@ -235,25 +388,27 @@ export default function CsvUploadsPage() {
   const handleFileChange = (event: ChangeEvent<HTMLInputElement>) => {
     const file = event.target.files?.[0] ?? null;
 
-    setSelectedFile(file);
+    setSelectedFileName(file?.name ?? null);
     setUploadState('idle');
     setStatusMessage(file ? `Ready to upload ${file.name}.` : 'No file selected.');
   };
 
   const handleUpload = async () => {
-    if (!selectedFile) {
+    const file = fileInputRef.current?.files?.[0] ?? null;
+
+    if (!file) {
       setUploadState('error');
       setStatusMessage('Select a CSV file before uploading.');
       return;
     }
 
     setUploadState('uploading');
-    setStatusMessage(`Uploading ${selectedFile.name}...`);
+    setStatusMessage(`Uploading ${file.name}...`);
 
     let batchId: string | number | null = null;
 
     try {
-      const fileContents = await selectedFile.text();
+      const fileContents = await file.text();
       const parsedRows = parseCsv(fileContents);
 
       if (parsedRows.length === 0) {
@@ -261,9 +416,19 @@ export default function CsvUploadsPage() {
       }
 
       const headers = parsedRows[0];
-      const dataRows = parsedRows.slice(1).filter((row) =>
-        row.some((value) => normalizeOptionalText(value) !== null)
-      );
+      const dataRows: CsvSourceRow[] = parsedRows
+        .slice(1)
+        .map((row, index) => ({
+          rowNumber: index + 2,
+          rawRecord: buildRowRecord(headers, row),
+        }))
+        .filter((row) =>
+          Object.values(row.rawRecord).some((value) => normalizeOptionalText(value) !== null)
+        );
+
+      if (dataRows.length === 0) {
+        throw new Error('CSV file has no data rows.');
+      }
 
       const {
         data: { user },
@@ -273,8 +438,13 @@ export default function CsvUploadsPage() {
         .from('upload_batches')
         .insert({
           uploaded_by: user?.id ?? null,
-          filename: selectedFile.name,
+          filename: file.name,
           status: 'processing',
+          total_rows: dataRows.length,
+          succeeded_rows: 0,
+          failed_rows: 0,
+          skipped_rows: 0,
+          error_message: null,
         })
         .select('id')
         .single();
@@ -286,160 +456,171 @@ export default function CsvUploadsPage() {
       batchId = batchRecord.id;
 
       const geocodeWarnings: string[] = [];
-      const normalizedRows: NormalizedCsvRow[] = dataRows.map((row) => {
-        const rawRecord = buildRowRecord(headers, row);
-        const recommendedModification = rawRecord['Recommended Modification'];
-        const noModifications = normalizeOptionalText(recommendedModification) === null;
-        const canonicalDietaryCompliance = canonicalizeDietaryCompliance(
-          rawRecord['Dietary Need Compliance']
-        );
+      const uploadRowsPayload = dataRows.map((row) => ({
+        batch_id: batchId,
+        row_number: row.rowNumber,
+        row_status: 'pending',
+        error_message: null,
+        raw_data: {
+          raw: row.rawRecord,
+        },
+      }));
 
-        const restaurant = normalizeRestaurantPayload({
-          restaurantName: rawRecord['Restaurant Name'],
-          restaurantAddress: rawRecord['Restaurant Address'],
-          restaurantCity: rawRecord['City'],
-          restaurantRegion: rawRecord['Region'],
-          restaurantPostalCode: rawRecord['Postal Code'],
-          onlineOrderingLink: rawRecord['Online Ordering Link'],
-        });
+      const { data: uploadRows, error: uploadRowsInsertError } = await supabase
+        .from('upload_rows')
+        .insert(uploadRowsPayload)
+        .select('id, row_number');
 
-        const menuItem = normalizeMenuItemPayload({
-          menuItem: rawRecord['Menu Item'],
-          basePrice: rawRecord['Base Price'],
-          priceWithModification: rawRecord['Price with Modification'],
-          recommendedModification,
-          ingredients: rawRecord['Ingredients'],
-          dietaryCompliance: canonicalDietaryCompliance,
-          noModifications,
-        });
-        const recommendedModificationValue = noModifications
-          ? 'No Modifications'
-          : menuItem.recommendedModification;
-        const priceWithModificationValue = noModifications
-          ? menuItem.basePrice
-          : menuItem.priceWithModification;
+      if (uploadRowsInsertError) {
+        throw uploadRowsInsertError;
+      }
 
-        if (!restaurant.name) {
-          throw new Error('Restaurant Name is required for every CSV row.');
+      const uploadRowRecordIds = new Map<number, string | number>(
+        ((uploadRows as UploadRowRecord[] | null) ?? []).map((row) => [row.row_number, row.id])
+      );
+      const seenRowKeys = new Set<string>();
+      let succeededRows = 0;
+      let failedRows = 0;
+      let skippedRows = 0;
+
+      for (const sourceRow of dataRows) {
+        const uploadRowId = uploadRowRecordIds.get(sourceRow.rowNumber);
+
+        if (uploadRowId === undefined) {
+          throw new Error(`Unable to track upload status for row ${sourceRow.rowNumber}.`);
         }
 
-        if (!restaurant.address && !restaurant.postalCode) {
-          throw new Error(
-            'Restaurant Address or Postal Code is required for every CSV row.'
-          );
-        }
+        let rowStatus: UploadRowOutcomeStatus = 'failed';
+        let rowErrorMessage: string | null = null;
+        let normalizedRowForStorage: NormalizedCsvRow | null = null;
+        let geocodeWarningForStorage: string | null = null;
 
-        if (!menuItem.name) {
-          throw new Error('Menu Item is required for every CSV row.');
-        }
+        try {
+          const normalizedRow = normalizeCsvRow(sourceRow.rawRecord, sourceRow.rowNumber);
+          const rowKey = buildMenuItemKey({
+            restaurant_name: normalizedRow.restaurant_name,
+            restaurant_address: normalizedRow.restaurant_address,
+            menu_item: normalizedRow.menu_item,
+          });
 
-        if (menuItem.basePrice === null || priceWithModificationValue === null) {
-          throw new Error('Base Price and Price with Modification are required for every CSV row.');
-        }
+          normalizedRowForStorage = normalizedRow;
 
-        if (!menuItem.dietaryCompliance) {
-          throw new Error('Dietary Need Compliance is required for every CSV row.');
-        }
+          if (seenRowKeys.has(rowKey)) {
+            rowStatus = 'skipped_duplicate';
+            rowErrorMessage = `Row ${sourceRow.rowNumber}: Duplicate row in this CSV upload.`;
+          } else {
+            seenRowKeys.add(rowKey);
 
-        if (!recommendedModificationValue) {
-          throw new Error(
-            'Recommended Modification is required when No Modifications is not implied.'
-          );
-        }
+            const { restaurantId, geocodeWarning } = await upsertRestaurant({
+              restaurant: normalizedRow.restaurant,
+            });
 
-        return {
-          restaurant_name: restaurant.name,
-          restaurant_address: restaurant.address || '',
-          menu_item: menuItem.name,
-          rawRecord,
-          restaurant,
-          menuItem: {
-            name: menuItem.name,
-            basePrice: menuItem.basePrice,
-            recommendedModification: recommendedModificationValue,
-            priceWithModification: priceWithModificationValue,
-            ingredients: menuItem.ingredients,
-            dietaryCompliance: menuItem.dietaryCompliance,
-          },
-        };
-      });
+            geocodeWarningForStorage = geocodeWarning;
 
-      const dedupedRows = dedupeMenuRows(normalizedRows);
+            if (geocodeWarning) {
+              geocodeWarnings.push(
+                `Row ${sourceRow.rowNumber} (${normalizedRow.restaurant.name}): ${geocodeWarning}`
+              );
+            }
 
-      for (const row of dedupedRows) {
-        const { restaurantId, geocodeWarning } = await upsertRestaurant({
-          restaurant: row.restaurant,
-        });
+            const menuItemPayload = buildMenuItemUpsert({
+              restaurantId,
+              row: normalizedRow,
+            });
 
-        if (geocodeWarning) {
-          geocodeWarnings.push(`${row.restaurant.name}: ${geocodeWarning}`);
-        }
+            const { error: menuItemError } = await supabase.from('menu_items').insert(menuItemPayload);
 
-        const menuItemPayload = buildMenuItemUpsert({
-          restaurantId,
-          row,
-        });
-
-        const { error: menuItemError } = await supabase.from('menu_items').insert(menuItemPayload);
-
-        if (menuItemError) {
-          if (menuItemError.code === '23505') {
-            continue;
+            if (menuItemError) {
+              if (menuItemError.code === '23505') {
+                rowStatus = 'skipped_duplicate';
+                rowErrorMessage = `Row ${sourceRow.rowNumber}: Duplicate menu item already exists.`;
+              } else {
+                throw menuItemError;
+              }
+            } else {
+              rowStatus = 'succeeded';
+            }
           }
-
-          throw menuItemError;
+        } catch (error) {
+          rowStatus = 'failed';
+          rowErrorMessage = getErrorMessage(error);
         }
-      }
 
-      const uploadRowsPayload = dedupedRows.map((row) => {
-        return {
-          batch_id: batchId,
-          row_status: 'pending',
-          raw_data: {
-            raw: row.rawRecord,
-            normalized: {
-              restaurant: row.restaurant,
-              menuItem: row.menuItem,
-            },
-          },
-        };
-      });
+        if (rowStatus === 'succeeded') {
+          succeededRows += 1;
+        } else if (rowStatus === 'skipped_duplicate') {
+          skippedRows += 1;
+        } else {
+          failedRows += 1;
+        }
 
-      if (uploadRowsPayload.length > 0) {
-        const { error: rowsInsertError } = await supabase
+        const { error: uploadRowUpdateError } = await supabase
           .from('upload_rows')
-          .insert(uploadRowsPayload);
+          .update({
+            row_status: rowStatus,
+            error_message: rowErrorMessage,
+            raw_data: {
+              raw: sourceRow.rawRecord,
+              normalized: normalizedRowForStorage
+                ? {
+                    restaurant: normalizedRowForStorage.restaurant,
+                    menuItem: normalizedRowForStorage.menuItem,
+                  }
+                : null,
+              geocode_warning: geocodeWarningForStorage,
+            },
+          })
+          .eq('id', uploadRowId);
 
-        if (rowsInsertError) {
-          throw rowsInsertError;
+        if (uploadRowUpdateError) {
+          throw uploadRowUpdateError;
         }
       }
+
+      const uploadSummary = summarizeUploadResults({
+        succeededRows,
+        failedRows,
+        skippedRows,
+      });
 
       const { error: batchUpdateError } = await supabase
         .from('upload_batches')
-        .update({ status: 'completed' })
+        .update({
+          status: uploadSummary.status,
+          total_rows: dataRows.length,
+          succeeded_rows: uploadSummary.succeededRows,
+          failed_rows: uploadSummary.failedRows,
+          skipped_rows: uploadSummary.skippedRows,
+          error_message: null,
+        })
         .eq('id', batchId);
 
       if (batchUpdateError) {
         throw batchUpdateError;
       }
 
-      setUploadState('success');
+      setUploadState(uploadSummary.status === 'error' ? 'error' : 'success');
       setStatusMessage(
-        `Upload completed. Stored ${uploadRowsPayload.length} deduplicated row${uploadRowsPayload.length === 1 ? '' : 's'}.${geocodeWarnings.length > 0 ? ` Geocoding warnings for ${geocodeWarnings.length} row${geocodeWarnings.length === 1 ? '' : 's'}.` : ''}`
+        `Upload finished for ${file.name}. ${uploadSummary.succeededRows} succeeded, ${uploadSummary.failedRows} failed, ${uploadSummary.skippedRows} skipped.${geocodeWarnings.length > 0 ? ` Geocoding warnings for ${geocodeWarnings.length} row${geocodeWarnings.length === 1 ? '' : 's'}.` : ''}`
       );
     } catch (error) {
+      const errorMessage = getErrorMessage(error);
+
       if (batchId !== null) {
-        await supabase.from('upload_batches').update({ status: 'error' }).eq('id', batchId);
+        await supabase
+          .from('upload_batches')
+          .update({
+            status: 'error',
+            error_message: errorMessage,
+          })
+          .eq('id', batchId);
       }
 
       console.error('CSV upload failed:', error);
       setUploadState('error');
-      setStatusMessage(
-        error instanceof Error
-          ? `CSV upload failed: ${error.message}`
-          : `CSV upload failed: ${JSON.stringify(error)}`
-      );
+      setStatusMessage(`CSV upload failed: ${errorMessage}`);
+    } finally {
+      clearSelectedFile();
     }
   };
 
@@ -474,11 +655,15 @@ export default function CsvUploadsPage() {
               </label>
               <input
                 id="csv-file"
+                ref={fileInputRef}
                 type="file"
                 accept=".csv,text/csv"
                 onChange={handleFileChange}
                 className={inputClassName()}
               />
+              {selectedFileName ? (
+                <p className="text-xs text-zinc-500">Selected: {selectedFileName}</p>
+              ) : null}
             </div>
 
             <div className="flex flex-col gap-3 sm:flex-row">
