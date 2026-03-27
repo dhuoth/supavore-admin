@@ -73,6 +73,12 @@ type UploadSummary = {
   skippedRows: number;
 };
 
+type VisibleRowIssue = {
+  rowNumber: number;
+  status: Exclude<UploadRowOutcomeStatus, 'succeeded'>;
+  message: string;
+};
+
 function inputClassName() {
   return 'w-full rounded-xl border border-zinc-200 bg-white px-4 py-3 text-sm text-zinc-950 outline-none transition file:mr-4 file:rounded-lg file:border-0 file:bg-zinc-100 file:px-3 file:py-2 file:text-sm file:font-medium file:text-zinc-700 focus:border-zinc-400 focus:ring-2 focus:ring-zinc-200';
 }
@@ -363,6 +369,7 @@ export default function CsvUploadsPage() {
   const [selectedFileName, setSelectedFileName] = useState<string | null>(null);
   const [uploadState, setUploadState] = useState<UploadState>('idle');
   const [statusMessage, setStatusMessage] = useState('No file selected.');
+  const [visibleRowIssues, setVisibleRowIssues] = useState<VisibleRowIssue[]>([]);
 
   const clearSelectedFile = () => {
     if (fileInputRef.current) {
@@ -391,6 +398,7 @@ export default function CsvUploadsPage() {
     setSelectedFileName(file?.name ?? null);
     setUploadState('idle');
     setStatusMessage(file ? `Ready to upload ${file.name}.` : 'No file selected.');
+    setVisibleRowIssues([]);
   };
 
   const handleUpload = async () => {
@@ -404,6 +412,7 @@ export default function CsvUploadsPage() {
 
     setUploadState('uploading');
     setStatusMessage(`Uploading ${file.name}...`);
+    setVisibleRowIssues([]);
 
     let batchId: string | number | null = null;
 
@@ -482,6 +491,7 @@ export default function CsvUploadsPage() {
       let succeededRows = 0;
       let failedRows = 0;
       let skippedRows = 0;
+      const nextVisibleRowIssues: VisibleRowIssue[] = [];
 
       for (const sourceRow of dataRows) {
         const uploadRowId = uploadRowRecordIds.get(sourceRow.rowNumber);
@@ -550,8 +560,22 @@ export default function CsvUploadsPage() {
           succeededRows += 1;
         } else if (rowStatus === 'skipped_duplicate') {
           skippedRows += 1;
+          if (rowErrorMessage) {
+            nextVisibleRowIssues.push({
+              rowNumber: sourceRow.rowNumber,
+              status: rowStatus,
+              message: rowErrorMessage,
+            });
+          }
         } else {
           failedRows += 1;
+          if (rowErrorMessage) {
+            nextVisibleRowIssues.push({
+              rowNumber: sourceRow.rowNumber,
+              status: rowStatus,
+              message: rowErrorMessage,
+            });
+          }
         }
 
         const { error: uploadRowUpdateError } = await supabase
@@ -599,9 +623,10 @@ export default function CsvUploadsPage() {
         throw batchUpdateError;
       }
 
+      setVisibleRowIssues(nextVisibleRowIssues);
       setUploadState(uploadSummary.status === 'error' ? 'error' : 'success');
       setStatusMessage(
-        `Upload finished for ${file.name}. ${uploadSummary.succeededRows} succeeded, ${uploadSummary.failedRows} failed, ${uploadSummary.skippedRows} skipped.${geocodeWarnings.length > 0 ? ` Geocoding warnings for ${geocodeWarnings.length} row${geocodeWarnings.length === 1 ? '' : 's'}.` : ''}`
+        `Upload finished for ${file.name}. ${uploadSummary.succeededRows} succeeded, ${uploadSummary.failedRows} failed, ${uploadSummary.skippedRows} skipped.${nextVisibleRowIssues.length > 0 ? ' Fix the listed rows, save the file, and re-upload it with the same filename.' : ''}${geocodeWarnings.length > 0 ? ` Geocoding warnings for ${geocodeWarnings.length} row${geocodeWarnings.length === 1 ? '' : 's'}.` : ''}`
       );
     } catch (error) {
       const errorMessage = getErrorMessage(error);
@@ -619,6 +644,7 @@ export default function CsvUploadsPage() {
       console.error('CSV upload failed:', error);
       setUploadState('error');
       setStatusMessage(`CSV upload failed: ${errorMessage}`);
+      setVisibleRowIssues([]);
     } finally {
       clearSelectedFile();
     }
@@ -685,6 +711,23 @@ export default function CsvUploadsPage() {
                 {uploadState === 'success' && `Success: ${statusMessage}`}
                 {uploadState === 'error' && `Error: ${statusMessage}`}
               </p>
+              {visibleRowIssues.length > 0 ? (
+                <div className="mt-4 space-y-3">
+                  <p className="text-xs font-medium uppercase tracking-wide text-zinc-500">
+                    Rows To Review
+                  </p>
+                  <ul className="space-y-2 text-sm text-zinc-700">
+                    {visibleRowIssues.map((issue) => (
+                      <li
+                        key={`${issue.status}-${issue.rowNumber}-${issue.message}`}
+                        className="rounded-xl border border-zinc-200 bg-white px-3 py-2"
+                      >
+                        {issue.message}
+                      </li>
+                    ))}
+                  </ul>
+                </div>
+              ) : null}
             </div>
           </div>
         </section>
