@@ -1,6 +1,7 @@
 'use client';
 
 import { ChangeEvent, useRef, useState } from 'react';
+import { buildAdminCsvTemplate } from '@/lib/csvTemplate';
 import { geocodeRestaurantLocationViaApi } from '@/lib/geocodingClient';
 import { buildMenuItemUpsert, buildRestaurantUpsert } from '@/lib/menuUpsertShapes';
 import {
@@ -12,21 +13,6 @@ import {
 import { mergeRestaurantLocation } from '@/lib/restaurantLocation';
 import { supabase } from '@/lib/supabaseClient';
 import { buildMenuItemKey } from '@/lib/menuValidation';
-
-const csvHeaders = [
-  'Restaurant Name',
-  'Restaurant Address',
-  'City',
-  'Region',
-  'Postal Code',
-  'Online Ordering Link',
-  'Menu Item',
-  'Base Price',
-  'Recommended Modification',
-  'Price with Modification',
-  'Ingredients',
-  'Dietary Need Compliance',
-] as const;
 
 type UploadState = 'idle' | 'uploading' | 'success' | 'error';
 
@@ -380,7 +366,7 @@ export default function CsvUploadsPage() {
   };
 
   const handleDownloadTemplate = () => {
-    const blob = new Blob([`${csvHeaders.join(',')}\n`], { type: 'text/csv;charset=utf-8' });
+    const blob = new Blob([buildAdminCsvTemplate()], { type: 'text/csv;charset=utf-8' });
     const objectUrl = URL.createObjectURL(blob);
     const link = document.createElement('a');
 
@@ -659,7 +645,8 @@ export default function CsvUploadsPage() {
           </h1>
           <p className="max-w-2xl text-sm text-zinc-600 sm:text-base">
             Upload CSV files for bulk menu database ingestion. Rows are normalized and stored for
-            later review and processing.
+            later review and processing. The downloaded template includes only the fields admins
+            need to fill out; location details can still be enriched during upload.
           </p>
         </header>
 
