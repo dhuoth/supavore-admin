@@ -1,8 +1,14 @@
 'use client';
 
+import Link from 'next/link';
 import { FormEvent, useEffect, useRef, useState } from 'react';
 import { formatAdminTimestamp } from '@/lib/adminTimestamp';
 import { geocodeRestaurantLocationViaApi } from '@/lib/geocodingClient';
+import { enrichRestaurantHoursViaApi } from '@/lib/googlePlacesHoursClient';
+import {
+  backfillRestaurantHours,
+  type RestaurantHoursBackfillItem,
+} from '@/lib/restaurantHoursBackfill';
 import {
   canonicalizeDietaryCompliance,
   dietaryOptions,
@@ -45,6 +51,15 @@ type MenuItemRow = {
     latitude: number | null;
     longitude: number | null;
     online_ordering_link: string | null;
+    google_place_id?: string | null;
+    hours_source?: string | null;
+    hours_last_synced_at?: string | null;
+    hours_sync_status?: string | null;
+    hours_match_confidence?: number | null;
+    hours_notes?: string | null;
+    timezone?: string | null;
+    place_name_from_source?: string | null;
+    hours_is_manually_managed?: boolean;
   } | null;
 };
 
@@ -74,6 +89,47 @@ type DuplicateKeyParts = {
   menuItem: string;
 };
 
+type RestaurantHoursAdminWindow = {
+  id?: string;
+  dayOfWeek: number;
+  openTimeLocal: string | null;
+  closeTimeLocal: string | null;
+  isClosed: boolean;
+  windowIndex: number;
+  source: string | null;
+};
+
+type RestaurantHoursAdminRecord = {
+  restaurantId: string;
+  googlePlaceId: string | null;
+  hoursSource: string | null;
+  hoursLastSyncedAt: string | null;
+  hoursSyncStatus: string | null;
+  hoursMatchConfidence: number | null;
+  hoursNotes: string | null;
+  timezone: string | null;
+  placeNameFromSource: string | null;
+  hoursIsManuallyManaged: boolean;
+  pendingReviewId?: string | null;
+  pendingReviewSummary?: string | null;
+  pendingReviewConfidence?: number | null;
+  pendingReviewPayload?: Record<string, unknown> | null;
+  hours: RestaurantHoursAdminWindow[];
+};
+
+type HoursEditorWindow = {
+  id: string;
+  windowIndex: number;
+  openTimeLocal: string;
+  closeTimeLocal: string;
+};
+
+type HoursEditorDay = {
+  dayOfWeek: number;
+  isClosed: boolean;
+  windows: HoursEditorWindow[];
+};
+
 const exclusiveDietaryOptions: DietaryOption[] = ['None', 'Unknown'];
 const standardDietaryOptions: DietaryOption[] = [
   'Vegan',
@@ -81,6 +137,46 @@ const standardDietaryOptions: DietaryOption[] = [
   'Gluten-Free',
   'No Nuts',
 ];
+const weekdayLabels = [
+  'Sunday',
+  'Monday',
+  'Tuesday',
+  'Wednesday',
+  'Thursday',
+  'Friday',
+  'Saturday',
+];
+
+function triggerRestaurantHoursEnrichment(input: {
+  restaurantId: string;
+  restaurantName: string;
+  address: string | null;
+  latitude: number | null;
+  longitude: number | null;
+}) {
+  if (!input.restaurantId || !input.restaurantName || !input.address) {
+    return;
+  }
+
+  void enrichRestaurantHoursViaApi(input)
+    .then((result) => {
+      if (!result.ok) {
+        console.warn('Google Places hours enrichment completed with a non-fatal warning.', {
+          restaurantId: input.restaurantId,
+          restaurantName: input.restaurantName,
+          status: result.status,
+          message: result.message,
+        });
+      }
+    })
+    .catch((error) => {
+      console.warn('Google Places hours enrichment request failed.', {
+        restaurantId: input.restaurantId,
+        restaurantName: input.restaurantName,
+        message: error instanceof Error ? error.message : 'Unknown error',
+      });
+    });
+}
 
 function FieldLabel({
   htmlFor,
@@ -106,6 +202,109 @@ function inputClassName() {
 function formatPrice(value: number | string | null) {
   if (value === null || value === undefined) return '—';
   return `$${Number(value).toFixed(2)}`;
+}
+
+function formatHoursDisplayTime(value: string | null | undefined) {
+  if (!value) {
+    return '—';
+  }
+
+  return value.slice(0, 5);
+}
+
+function buildEmptyHoursEditorDays(): HoursEditorDay[] {
+  return weekdayLabels.map((_, dayOfWeek) => ({
+    dayOfWeek,
+    isClosed: true,
+    windows: [],
+  }));
+}
+
+function buildHoursEditorState(hours: RestaurantHoursAdminWindow[]): HoursEditorDay[] {
+  const days = buildEmptyHoursEditorDays();
+
+  for (const hour of hours) {
+    const day = days[hour.dayOfWeek];
+
+    if (!day) {
+      continue;
+    }
+
+    if (hour.isClosed) {
+      day.isClosed = true;
+      day.windows = [];
+      continue;
+    }
+
+    day.isClosed = false;
+    day.windows.push({
+      id: hour.id ?? `${hour.dayOfWeek}-${hour.windowIndex}`,
+      windowIndex: hour.windowIndex,
+      openTimeLocal: hour.openTimeLocal?.slice(0, 5) ?? '',
+      closeTimeLocal: hour.closeTimeLocal?.slice(0, 5) ?? '',
+    });
+  }
+
+  for (const day of days) {
+    day.windows.sort((left, right) => left.windowIndex - right.windowIndex);
+  }
+
+  return days;
+}
+
+function buildHoursPayload(days: HoursEditorDay[]) {
+  return days.flatMap<{
+    dayOfWeek: number;
+    openTimeLocal: string | null;
+    closeTimeLocal: string | null;
+    isClosed: boolean;
+    windowIndex: number;
+    source: string;
+  }>((day) => {
+    if (day.isClosed || day.windows.length === 0) {
+      return [
+        {
+          dayOfWeek: day.dayOfWeek,
+          openTimeLocal: null,
+          closeTimeLocal: null,
+          isClosed: true,
+          windowIndex: 1,
+          source: 'admin_manual',
+        },
+      ];
+    }
+
+    return day.windows.map((window, index) => {
+      if (!window.openTimeLocal || !window.closeTimeLocal) {
+        throw new Error(`Enter both open and close times for ${weekdayLabels[day.dayOfWeek]}.`);
+      }
+
+      return {
+        dayOfWeek: day.dayOfWeek,
+        openTimeLocal: window.openTimeLocal,
+        closeTimeLocal: window.closeTimeLocal,
+        isClosed: false,
+        windowIndex: index + 1,
+        source: 'admin_manual',
+      };
+    });
+  });
+}
+
+function getErrorMessage(error: unknown) {
+  if (error instanceof Error) {
+    return error.message;
+  }
+
+  if (typeof error === 'object' && error !== null && 'error' in error) {
+    const message = (error as { error?: unknown }).error;
+
+    if (typeof message === 'string') {
+      return message;
+    }
+  }
+
+  return 'Unable to complete this request right now.';
 }
 
 function normalizeForEntityMatch(value: string | null | undefined) {
@@ -249,9 +448,22 @@ export default function MenuDatabasePage() {
   const [loadingMenuItems, setLoadingMenuItems] = useState(true);
   const [isSaving, setIsSaving] = useState(false);
   const [isBackfillingLocations, setIsBackfillingLocations] = useState(false);
+  const [isBackfillingHours, setIsBackfillingHours] = useState(false);
   const [backfillResults, setBackfillResults] = useState<RestaurantLocationBackfillItem[]>([]);
+  const [hoursBackfillResults, setHoursBackfillResults] = useState<RestaurantHoursBackfillItem[]>(
+    []
+  );
   const [saveMessage, setSaveMessage] = useState<string | null>(null);
   const [saveError, setSaveError] = useState<string | null>(null);
+  const [hoursRecord, setHoursRecord] = useState<RestaurantHoursAdminRecord | null>(null);
+  const [hoursEditorDays, setHoursEditorDays] = useState<HoursEditorDay[]>(
+    buildEmptyHoursEditorDays()
+  );
+  const [hoursLoading, setHoursLoading] = useState(false);
+  const [hoursLoadError, setHoursLoadError] = useState<string | null>(null);
+  const [isHoursEditing, setIsHoursEditing] = useState(false);
+  const [isHoursSaving, setIsHoursSaving] = useState(false);
+  const [isHoursRefreshing, setIsHoursRefreshing] = useState(false);
   const [pendingDuplicateCandidate, setPendingDuplicateCandidate] = useState<MenuItemRow | null>(
     null
   );
@@ -285,7 +497,16 @@ export default function MenuDatabasePage() {
           postal_code,
           latitude,
           longitude,
-          online_ordering_link
+          online_ordering_link,
+          google_place_id,
+          hours_source,
+          hours_last_synced_at,
+          hours_sync_status,
+          hours_match_confidence,
+          hours_notes,
+          timezone,
+          place_name_from_source,
+          hours_is_manually_managed
         )
       `)
       .order('created_at', { ascending: false });
@@ -332,8 +553,12 @@ export default function MenuDatabasePage() {
   const handleCloseDrawer = () => {
     setSelectedMenuItem(null);
     setIsEditing(false);
+    setIsHoursEditing(false);
     setEditingMenuItemId(null);
     setDrawerEditState(createEmptyDrawerEditState());
+    setHoursRecord(null);
+    setHoursEditorDays(buildEmptyHoursEditorDays());
+    setHoursLoadError(null);
   };
 
   const handleCancelEdit = () => {
@@ -433,6 +658,14 @@ export default function MenuDatabasePage() {
         throw restaurantInsertError;
       }
 
+      triggerRestaurantHoursEnrichment({
+        restaurantId: insertedRestaurant.id,
+        restaurantName: restaurantWritePayload.name,
+        address: restaurantWritePayload.address,
+        latitude: restaurantWritePayload.latitude,
+        longitude: restaurantWritePayload.longitude,
+      });
+
       return {
         restaurantId: insertedRestaurant.id,
         geocodeWarning: geocodeResult && !geocodeResult.ok ? geocodeResult.warning : null,
@@ -468,6 +701,14 @@ export default function MenuDatabasePage() {
       if (restaurantUpdateError) {
         throw restaurantUpdateError;
       }
+
+      triggerRestaurantHoursEnrichment({
+        restaurantId: matchingRestaurant.id,
+        restaurantName: restaurantWritePayload.name,
+        address: restaurantWritePayload.address,
+        latitude: restaurantWritePayload.latitude,
+        longitude: restaurantWritePayload.longitude,
+      });
     }
 
     return {
@@ -800,6 +1041,199 @@ export default function MenuDatabasePage() {
     }
   };
 
+  const loadRestaurantHours = async (restaurantId: string) => {
+    setHoursLoading(true);
+    setHoursLoadError(null);
+
+    try {
+      const response = await fetch(
+        `/api/restaurants/hours?restaurantId=${encodeURIComponent(restaurantId)}`
+      );
+      const payload = (await response.json()) as RestaurantHoursAdminRecord | { error?: string };
+
+      if (!response.ok) {
+        throw new Error(getErrorMessage(payload));
+      }
+
+      const record = payload as RestaurantHoursAdminRecord;
+      setHoursRecord(record);
+      setHoursEditorDays(buildHoursEditorState(record.hours));
+    } catch (error) {
+      setHoursRecord(null);
+      setHoursEditorDays(buildEmptyHoursEditorDays());
+      setHoursLoadError(getErrorMessage(error));
+    } finally {
+      setHoursLoading(false);
+    }
+  };
+
+  const handleHoursDayClosedChange = (dayOfWeek: number, isClosed: boolean) => {
+    setHoursEditorDays((current) =>
+      current.map((day) =>
+        day.dayOfWeek !== dayOfWeek
+          ? day
+          : {
+              ...day,
+              isClosed,
+              windows: isClosed
+                ? []
+                : day.windows.length > 0
+                  ? day.windows
+                  : [
+                      {
+                        id: `${dayOfWeek}-${crypto.randomUUID()}`,
+                        windowIndex: 1,
+                        openTimeLocal: '',
+                        closeTimeLocal: '',
+                      },
+                    ],
+            }
+      )
+    );
+  };
+
+  const handleHoursWindowChange = (
+    dayOfWeek: number,
+    windowId: string,
+    field: 'openTimeLocal' | 'closeTimeLocal',
+    value: string
+  ) => {
+    setHoursEditorDays((current) =>
+      current.map((day) =>
+        day.dayOfWeek !== dayOfWeek
+          ? day
+          : {
+              ...day,
+              windows: day.windows.map((window) =>
+                window.id === windowId
+                  ? {
+                      ...window,
+                      [field]: value,
+                    }
+                  : window
+              ),
+            }
+      )
+    );
+  };
+
+  const handleAddHoursWindow = (dayOfWeek: number) => {
+    setHoursEditorDays((current) =>
+      current.map((day) =>
+        day.dayOfWeek !== dayOfWeek
+          ? day
+          : {
+              ...day,
+              isClosed: false,
+              windows: [
+                ...day.windows,
+                {
+                  id: `${dayOfWeek}-${crypto.randomUUID()}`,
+                  windowIndex: day.windows.length + 1,
+                  openTimeLocal: '',
+                  closeTimeLocal: '',
+                },
+              ],
+            }
+      )
+    );
+  };
+
+  const handleRemoveHoursWindow = (dayOfWeek: number, windowId: string) => {
+    setHoursEditorDays((current) =>
+      current.map((day) => {
+        if (day.dayOfWeek !== dayOfWeek) {
+          return day;
+        }
+
+        const nextWindows = day.windows
+          .filter((window) => window.id !== windowId)
+          .map((window, index) => ({
+            ...window,
+            windowIndex: index + 1,
+          }));
+
+        return {
+          ...day,
+          windows: nextWindows,
+          isClosed: nextWindows.length === 0 ? true : day.isClosed,
+        };
+      })
+    );
+  };
+
+  const handleHoursEditCancel = () => {
+    setIsHoursEditing(false);
+    setHoursEditorDays(buildHoursEditorState(hoursRecord?.hours ?? []));
+  };
+
+  const handleHoursSave = async () => {
+    if (!hoursRecord) {
+      return;
+    }
+
+    setIsHoursSaving(true);
+    setSaveError(null);
+    setSaveMessage(null);
+
+    try {
+      const response = await fetch('/api/restaurants/hours', {
+        method: 'PATCH',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          restaurantId: hoursRecord.restaurantId,
+          hours: buildHoursPayload(hoursEditorDays),
+          note: 'Hours updated manually from Supavore Admin.',
+        }),
+      });
+      const payload = (await response.json()) as { message?: string; error?: string };
+
+      if (!response.ok) {
+        throw new Error(getErrorMessage(payload));
+      }
+
+      setIsHoursEditing(false);
+      setSaveMessage(payload.message ?? 'Operating hours saved.');
+      await loadRestaurantHours(hoursRecord.restaurantId);
+      await fetchMenuItems();
+    } catch (error) {
+      setSaveError(getErrorMessage(error));
+    } finally {
+      setIsHoursSaving(false);
+    }
+  };
+
+  const handleHoursRefresh = async () => {
+    if (!selectedMenuItem?.restaurants?.id) {
+      return;
+    }
+
+    setIsHoursRefreshing(true);
+    setSaveError(null);
+    setSaveMessage(null);
+
+    try {
+      const result = await enrichRestaurantHoursViaApi({
+        restaurantId: selectedMenuItem.restaurants.id,
+        restaurantName: selectedMenuItem.restaurants.name || '',
+        address: selectedMenuItem.restaurants.address,
+        latitude: selectedMenuItem.restaurants.latitude,
+        longitude: selectedMenuItem.restaurants.longitude,
+        force: true,
+      });
+
+      setSaveMessage(result.message);
+      await loadRestaurantHours(selectedMenuItem.restaurants.id);
+      await fetchMenuItems();
+    } catch (error) {
+      setSaveError(getErrorMessage(error));
+    } finally {
+      setIsHoursRefreshing(false);
+    }
+  };
+
   const handleLocationBackfill = async () => {
     setBackfillResults([]);
     setSaveMessage(null);
@@ -831,9 +1265,55 @@ export default function MenuDatabasePage() {
     }
   };
 
+  const handleHoursBackfill = async () => {
+    setHoursBackfillResults([]);
+    setSaveMessage(null);
+    setSaveError(null);
+    setIsBackfillingHours(true);
+
+    try {
+      const result = await backfillRestaurantHours();
+      const issueResults = result.results.filter(
+        (entry) => entry.status !== 'matched_with_hours' && entry.status !== 'matched_no_hours'
+      );
+      const issueSuffix =
+        issueResults.length > 0
+          ? ` ${issueResults.length} issue${issueResults.length === 1 ? '' : 's'} logged.`
+          : '';
+
+      setHoursBackfillResults(issueResults);
+      setSaveMessage(
+        `Restaurant hours backfill complete. Attempted ${result.attempted}, succeeded ${result.succeeded}, failed ${result.failed}.${issueSuffix}`
+      );
+      await fetchMenuItems();
+
+      if (selectedMenuItem?.restaurants?.id) {
+        await loadRestaurantHours(selectedMenuItem.restaurants.id);
+      }
+    } catch (error) {
+      setSaveError(getErrorMessage(error));
+    } finally {
+      setIsBackfillingHours(false);
+    }
+  };
+
   useEffect(() => {
     fetchMenuItems();
   }, []);
+
+  useEffect(() => {
+    const restaurantId = selectedMenuItem?.restaurants?.id;
+
+    if (!restaurantId) {
+      setHoursRecord(null);
+      setHoursEditorDays(buildEmptyHoursEditorDays());
+      setHoursLoadError(null);
+      setIsHoursEditing(false);
+      return;
+    }
+
+    void loadRestaurantHours(restaurantId);
+  }, [selectedMenuItem?.restaurants?.id]);
 
   useEffect(() => {
     if (!selectedMenuItem) {
@@ -916,14 +1396,24 @@ export default function MenuDatabasePage() {
             </p>
           </div>
 
-          <button
-            type="button"
-            onClick={handleLocationBackfill}
-            disabled={isBackfillingLocations || isSaving}
-            className="inline-flex items-center justify-center rounded-2xl border border-zinc-200 bg-white px-5 py-3 text-sm font-medium text-zinc-700 transition hover:bg-zinc-50 disabled:cursor-not-allowed disabled:bg-zinc-100 disabled:text-zinc-400"
-          >
-            {isBackfillingLocations ? 'Backfilling...' : 'Backfill Restaurant Locations'}
-          </button>
+          <div className="flex flex-col gap-3 sm:flex-row">
+            <button
+              type="button"
+              onClick={handleLocationBackfill}
+              disabled={isBackfillingLocations || isSaving || isBackfillingHours}
+              className="inline-flex items-center justify-center rounded-2xl border border-zinc-200 bg-white px-5 py-3 text-sm font-medium text-zinc-700 transition hover:bg-zinc-50 disabled:cursor-not-allowed disabled:bg-zinc-100 disabled:text-zinc-400"
+            >
+              {isBackfillingLocations ? 'Backfilling...' : 'Backfill Restaurant Locations'}
+            </button>
+            <button
+              type="button"
+              onClick={handleHoursBackfill}
+              disabled={isBackfillingHours || isSaving || isBackfillingLocations}
+              className="inline-flex items-center justify-center rounded-2xl border border-zinc-200 bg-white px-5 py-3 text-sm font-medium text-zinc-700 transition hover:bg-zinc-50 disabled:cursor-not-allowed disabled:bg-zinc-100 disabled:text-zinc-400"
+            >
+              {isBackfillingHours ? 'Backfilling...' : 'Backfill Operating Hours'}
+            </button>
+          </div>
         </header>
 
         {saveError ? <p className="text-sm text-red-600">{saveError}</p> : null}
@@ -941,6 +1431,24 @@ export default function MenuDatabasePage() {
                 <li>
                   ...and {backfillResults.length - maxVisibleBackfillWarnings} more issue
                   {backfillResults.length - maxVisibleBackfillWarnings === 1 ? '' : 's'}.
+                </li>
+              ) : null}
+            </ul>
+          </div>
+        ) : null}
+        {hoursBackfillResults.length > 0 ? (
+          <div className="rounded-2xl border border-amber-200 bg-amber-50 p-4 text-sm text-amber-900">
+            <p className="font-medium">Operating hours backfill issues</p>
+            <ul className="mt-2 space-y-1">
+              {hoursBackfillResults.slice(0, maxVisibleBackfillWarnings).map((result) => (
+                <li key={`${result.restaurantId}-${result.status}`}>
+                  {(result.name || 'Unknown restaurant') + ': ' + result.message}
+                </li>
+              ))}
+              {hoursBackfillResults.length > maxVisibleBackfillWarnings ? (
+                <li>
+                  ...and {hoursBackfillResults.length - maxVisibleBackfillWarnings} more issue
+                  {hoursBackfillResults.length - maxVisibleBackfillWarnings === 1 ? '' : 's'}.
                 </li>
               ) : null}
             </ul>
@@ -1829,6 +2337,282 @@ export default function MenuDatabasePage() {
         </div>
                 </div>
               )}
+
+              <section className="mt-8 rounded-3xl border border-zinc-200 bg-zinc-50/60 p-5 sm:p-6">
+                <div className="flex flex-col gap-4 sm:flex-row sm:items-start sm:justify-between">
+                  <div>
+                    <h3 className="text-lg font-semibold text-zinc-950">Operating Hours</h3>
+                    <p className="mt-1 text-sm text-zinc-600">
+                      Review stored hours, make manual edits, or refresh from Google Places.
+                    </p>
+                  </div>
+
+                  <div className="flex flex-wrap gap-3">
+                    {isHoursEditing ? (
+                      <>
+                        <button
+                          type="button"
+                          onClick={handleHoursSave}
+                          disabled={isHoursSaving || hoursLoading}
+                          className="inline-flex items-center justify-center rounded-2xl bg-black px-4 py-2 text-sm font-medium text-white transition hover:bg-neutral-800 disabled:cursor-not-allowed disabled:bg-zinc-300"
+                        >
+                          {isHoursSaving ? 'Saving...' : 'Save Hours'}
+                        </button>
+                        <button
+                          type="button"
+                          onClick={handleHoursEditCancel}
+                          disabled={isHoursSaving}
+                          className="inline-flex items-center justify-center rounded-2xl border border-zinc-200 bg-white px-4 py-2 text-sm font-medium text-zinc-700 transition hover:bg-zinc-50"
+                        >
+                          Cancel
+                        </button>
+                      </>
+                    ) : (
+                      <button
+                        type="button"
+                        onClick={() => setIsHoursEditing(true)}
+                        disabled={hoursLoading || !hoursRecord}
+                        className="inline-flex items-center justify-center rounded-2xl border border-zinc-200 bg-white px-4 py-2 text-sm font-medium text-zinc-700 transition hover:bg-zinc-50 disabled:cursor-not-allowed disabled:bg-zinc-100 disabled:text-zinc-400"
+                      >
+                        Edit Hours
+                      </button>
+                    )}
+                    <button
+                      type="button"
+                      onClick={handleHoursRefresh}
+                      disabled={isHoursRefreshing || hoursLoading || !selectedMenuItem.restaurants?.id}
+                      className="inline-flex items-center justify-center rounded-2xl border border-zinc-200 bg-white px-4 py-2 text-sm font-medium text-zinc-700 transition hover:bg-zinc-50 disabled:cursor-not-allowed disabled:bg-zinc-100 disabled:text-zinc-400"
+                    >
+                      {isHoursRefreshing ? 'Refreshing...' : 'Refresh Hours from Google'}
+                    </button>
+                  </div>
+                </div>
+
+                {hoursLoadError ? <p className="mt-4 text-sm text-red-600">{hoursLoadError}</p> : null}
+
+                {hoursRecord?.pendingReviewId ? (
+                  <div className="mt-5 rounded-2xl border border-amber-200 bg-amber-50 p-4 text-sm text-amber-900">
+                    <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
+                      <div>
+                        <p className="font-medium">Needs Review</p>
+                        <p className="mt-1">
+                          {hoursRecord.pendingReviewSummary || 'A Google Places candidate needs admin review.'}
+                        </p>
+                        {hoursRecord.pendingReviewConfidence !== null &&
+                        hoursRecord.pendingReviewConfidence !== undefined ? (
+                          <p className="mt-1 text-xs text-amber-800">
+                            Confidence: {hoursRecord.pendingReviewConfidence.toFixed(2)}
+                          </p>
+                        ) : null}
+                      </div>
+                      <Link
+                        href="/admin/reviews"
+                        className="inline-flex items-center justify-center rounded-xl border border-amber-300 bg-white px-4 py-2 text-sm font-medium text-amber-900 transition hover:bg-amber-100"
+                      >
+                        Open Reviews
+                      </Link>
+                    </div>
+                  </div>
+                ) : null}
+
+                {hoursRecord ? (
+                  <div className="mt-5 grid gap-4 sm:grid-cols-2 xl:grid-cols-3">
+                    <div className="rounded-2xl border border-zinc-200 bg-white p-4">
+                      <p className="text-xs text-zinc-500">Source</p>
+                      <p className="mt-1 text-sm text-zinc-800">{hoursRecord.hoursSource || '—'}</p>
+                    </div>
+                    <div className="rounded-2xl border border-zinc-200 bg-white p-4">
+                      <p className="text-xs text-zinc-500">Sync Status</p>
+                      <p className="mt-1 text-sm text-zinc-800">{hoursRecord.hoursSyncStatus || '—'}</p>
+                    </div>
+                    <div className="rounded-2xl border border-zinc-200 bg-white p-4">
+                      <p className="text-xs text-zinc-500">Last Synced</p>
+                      <p className="mt-1 text-sm text-zinc-800">
+                        {hoursRecord.hoursLastSyncedAt
+                          ? formatAdminTimestamp(hoursRecord.hoursLastSyncedAt)
+                          : '—'}
+                      </p>
+                    </div>
+                    <div className="rounded-2xl border border-zinc-200 bg-white p-4">
+                      <p className="text-xs text-zinc-500">Timezone</p>
+                      <p className="mt-1 text-sm text-zinc-800">{hoursRecord.timezone || '—'}</p>
+                    </div>
+                    <div className="rounded-2xl border border-zinc-200 bg-white p-4">
+                      <p className="text-xs text-zinc-500">Google Place ID</p>
+                      <p className="mt-1 break-all text-sm text-zinc-800">
+                        {hoursRecord.googlePlaceId || '—'}
+                      </p>
+                    </div>
+                    <div className="rounded-2xl border border-zinc-200 bg-white p-4">
+                      <p className="text-xs text-zinc-500">Manual Lock</p>
+                      <p className="mt-1 text-sm text-zinc-800">
+                        {hoursRecord.hoursIsManuallyManaged ? 'Enabled' : 'Off'}
+                      </p>
+                    </div>
+                    <div className="rounded-2xl border border-zinc-200 bg-white p-4">
+                      <p className="text-xs text-zinc-500">Review Status</p>
+                      <p className="mt-1 text-sm text-zinc-800">
+                        {hoursRecord.pendingReviewId ? 'Pending review' : 'None'}
+                      </p>
+                    </div>
+                    <div className="rounded-2xl border border-zinc-200 bg-white p-4 sm:col-span-2 xl:col-span-3">
+                      <p className="text-xs text-zinc-500">Source Place Name / Notes</p>
+                      <p className="mt-1 text-sm text-zinc-800">
+                        {hoursRecord.placeNameFromSource || '—'}
+                        {hoursRecord.hoursNotes ? ` · ${hoursRecord.hoursNotes}` : ''}
+                      </p>
+                    </div>
+                    {hoursRecord.pendingReviewPayload ? (
+                      <div className="rounded-2xl border border-zinc-200 bg-white p-4 sm:col-span-2 xl:col-span-3">
+                        <p className="text-xs text-zinc-500">Review Candidate</p>
+                        <p className="mt-1 text-sm text-zinc-800">
+                          {typeof hoursRecord.pendingReviewPayload.matchedDisplayName === 'string'
+                            ? hoursRecord.pendingReviewPayload.matchedDisplayName
+                            : '—'}
+                          {typeof hoursRecord.pendingReviewPayload.candidateFormattedAddress === 'string'
+                            ? ` · ${hoursRecord.pendingReviewPayload.candidateFormattedAddress}`
+                            : ''}
+                        </p>
+                      </div>
+                    ) : null}
+                  </div>
+                ) : null}
+
+                {hoursLoading ? (
+                  <p className="mt-5 text-sm text-zinc-500">Loading operating hours...</p>
+                ) : isHoursEditing ? (
+                  <div className="mt-6 space-y-4">
+                    {hoursEditorDays.map((day) => (
+                      <div
+                        key={day.dayOfWeek}
+                        className="rounded-2xl border border-zinc-200 bg-white p-4"
+                      >
+                        <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+                          <div>
+                            <p className="text-sm font-medium text-zinc-900">
+                              {weekdayLabels[day.dayOfWeek]}
+                            </p>
+                            <p className="text-xs text-zinc-500">
+                              {day.isClosed ? 'Closed all day' : 'Set one or more opening windows.'}
+                            </p>
+                          </div>
+
+                          <label className="flex items-center gap-2 text-sm text-zinc-700">
+                            <input
+                              type="checkbox"
+                              checked={day.isClosed}
+                              onChange={(event) =>
+                                handleHoursDayClosedChange(day.dayOfWeek, event.target.checked)
+                              }
+                              className="h-4 w-4 rounded border-zinc-300 text-zinc-900 focus:ring-zinc-300"
+                            />
+                            Closed
+                          </label>
+                        </div>
+
+                        {day.isClosed ? null : (
+                          <div className="mt-4 space-y-3">
+                            {day.windows.map((window) => (
+                              <div
+                                key={window.id}
+                                className="grid gap-3 rounded-2xl border border-zinc-200 bg-zinc-50 p-3 sm:grid-cols-[1fr_1fr_auto]"
+                              >
+                                <div>
+                                  <FieldLabel
+                                    htmlFor={`hours-open-${day.dayOfWeek}-${window.id}`}
+                                    label={`Open ${window.windowIndex}`}
+                                  />
+                                  <input
+                                    id={`hours-open-${day.dayOfWeek}-${window.id}`}
+                                    type="time"
+                                    value={window.openTimeLocal}
+                                    onChange={(event) =>
+                                      handleHoursWindowChange(
+                                        day.dayOfWeek,
+                                        window.id,
+                                        'openTimeLocal',
+                                        event.target.value
+                                      )
+                                    }
+                                    className={textInputClassName}
+                                  />
+                                </div>
+                                <div>
+                                  <FieldLabel
+                                    htmlFor={`hours-close-${day.dayOfWeek}-${window.id}`}
+                                    label={`Close ${window.windowIndex}`}
+                                  />
+                                  <input
+                                    id={`hours-close-${day.dayOfWeek}-${window.id}`}
+                                    type="time"
+                                    value={window.closeTimeLocal}
+                                    onChange={(event) =>
+                                      handleHoursWindowChange(
+                                        day.dayOfWeek,
+                                        window.id,
+                                        'closeTimeLocal',
+                                        event.target.value
+                                      )
+                                    }
+                                    className={textInputClassName}
+                                  />
+                                </div>
+                                <div className="flex items-end">
+                                  <button
+                                    type="button"
+                                    onClick={() => handleRemoveHoursWindow(day.dayOfWeek, window.id)}
+                                    className="inline-flex items-center justify-center rounded-2xl border border-zinc-200 bg-white px-4 py-3 text-sm font-medium text-zinc-700 transition hover:bg-zinc-50"
+                                  >
+                                    Remove
+                                  </button>
+                                </div>
+                              </div>
+                            ))}
+                            <button
+                              type="button"
+                              onClick={() => handleAddHoursWindow(day.dayOfWeek)}
+                              className="inline-flex items-center justify-center rounded-2xl border border-zinc-200 bg-white px-4 py-2 text-sm font-medium text-zinc-700 transition hover:bg-zinc-50"
+                            >
+                              Add Window
+                            </button>
+                          </div>
+                        )}
+                      </div>
+                    ))}
+                  </div>
+                ) : (
+                  <div className="mt-6 space-y-3">
+                    {weekdayLabels.map((label, dayOfWeek) => {
+                      const dayHours = (hoursRecord?.hours ?? []).filter(
+                        (hour) => hour.dayOfWeek === dayOfWeek
+                      );
+                      const hasClosedWindow = dayHours.some((hour) => hour.isClosed);
+
+                      return (
+                        <div
+                          key={label}
+                          className="flex flex-col gap-2 rounded-2xl border border-zinc-200 bg-white p-4 sm:flex-row sm:items-start sm:justify-between"
+                        >
+                          <p className="text-sm font-medium text-zinc-900">{label}</p>
+                          <div className="text-sm text-zinc-700 sm:text-right">
+                            {dayHours.length === 0 ? (
+                              <p>No saved hours.</p>
+                            ) : hasClosedWindow ? (
+                              <p>Closed</p>
+                            ) : (
+                              dayHours.map((hour) => (
+                                <p key={`${label}-${hour.windowIndex}`}>
+                                  {`${formatHoursDisplayTime(hour.openTimeLocal)} - ${formatHoursDisplayTime(hour.closeTimeLocal)}`}
+                                </p>
+                              ))
+                            )}
+                          </div>
+                        </div>
+                      );
+                    })}
+                  </div>
+                )}
+              </section>
             </div>
           </div>
         ) : null}

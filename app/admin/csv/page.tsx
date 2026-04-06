@@ -3,6 +3,7 @@
 import { ChangeEvent, useRef, useState } from 'react';
 import { buildAdminCsvTemplate } from '@/lib/csvTemplate';
 import { geocodeRestaurantLocationViaApi } from '@/lib/geocodingClient';
+import { enrichRestaurantHoursViaApi } from '@/lib/googlePlacesHoursClient';
 import { buildMenuItemUpsert, buildRestaurantUpsert } from '@/lib/menuUpsertShapes';
 import {
   canonicalizeDietaryCompliance,
@@ -64,6 +65,26 @@ type VisibleRowIssue = {
   status: Exclude<UploadRowOutcomeStatus, 'succeeded'>;
   message: string;
 };
+
+function triggerRestaurantHoursEnrichment(input: {
+  restaurantId: string;
+  restaurantName: string;
+  address: string | null;
+  latitude: number | null;
+  longitude: number | null;
+}) {
+  if (!input.restaurantId || !input.restaurantName || !input.address) {
+    return;
+  }
+
+  void enrichRestaurantHoursViaApi(input).catch((error) => {
+    console.warn('Google Places hours enrichment request failed.', {
+      restaurantId: input.restaurantId,
+      restaurantName: input.restaurantName,
+      message: error instanceof Error ? error.message : 'Unknown error',
+    });
+  });
+}
 
 function inputClassName() {
   return 'w-full rounded-xl border border-zinc-200 bg-white px-4 py-3 text-sm text-zinc-950 outline-none transition file:mr-4 file:rounded-lg file:border-0 file:bg-zinc-100 file:px-3 file:py-2 file:text-sm file:font-medium file:text-zinc-700 focus:border-zinc-400 focus:ring-2 focus:ring-zinc-200';
@@ -326,6 +347,14 @@ async function upsertRestaurant(row: {
       if (restaurantUpdateError) {
         throw restaurantUpdateError;
       }
+
+      triggerRestaurantHoursEnrichment({
+        restaurantId: existingRestaurant.id,
+        restaurantName: restaurantPayload.name,
+        address: restaurantPayload.address,
+        latitude: restaurantPayload.latitude,
+        longitude: restaurantPayload.longitude,
+      });
     }
 
     return {
@@ -343,6 +372,14 @@ async function upsertRestaurant(row: {
   if (insertedRestaurantError) {
     throw insertedRestaurantError;
   }
+
+  triggerRestaurantHoursEnrichment({
+    restaurantId: insertedRestaurant.id,
+    restaurantName: restaurantPayload.name,
+    address: restaurantPayload.address,
+    latitude: restaurantPayload.latitude,
+    longitude: restaurantPayload.longitude,
+  });
 
   return {
     restaurantId: insertedRestaurant.id,

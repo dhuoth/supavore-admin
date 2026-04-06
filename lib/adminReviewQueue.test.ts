@@ -1,0 +1,72 @@
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import { getReviewById, listPendingReviews } from '@/lib/adminReviewQueue';
+
+const sampleReview = {
+  id: 'review-1',
+  review_type: 'restaurant_hours_place_match' as const,
+  entity_type: 'restaurant',
+  entity_id: 'restaurant-1',
+  status: 'pending' as const,
+  priority: 'normal',
+  source: 'google_places_new',
+  summary: 'Needs review.',
+  confidence: 0.67,
+  review_payload: {
+    restaurantName: "Bludso's",
+    matchedDisplayName: "Bludso's BBQ",
+  },
+  decision_payload: null,
+  created_at: '2026-04-06T20:00:00.000Z',
+  updated_at: '2026-04-06T20:00:00.000Z',
+  resolved_at: null,
+  resolved_by: null,
+};
+
+test('listPendingReviews returns pending review queue items for the requested type', async () => {
+  const reviews = await listPendingReviews('restaurant_hours_place_match', {
+    async listReviews() {
+      return [sampleReview];
+    },
+    async getReviewById() {
+      return null;
+    },
+    async upsertPendingReview() {
+      return null;
+    },
+    async clearPendingReview() {
+      return null;
+    },
+    async resolveReview() {
+      return null;
+    },
+  });
+
+  assert.equal(reviews.length, 1);
+  assert.equal(reviews[0]?.id, 'review-1');
+  assert.equal(reviews[0]?.reviewPayload.matchedDisplayName, "Bludso's BBQ");
+});
+
+test('getReviewById returns a normalized review queue item', async () => {
+  const review = await getReviewById('review-1', {
+    async listReviews() {
+      return [];
+    },
+    async getReviewById() {
+      return sampleReview;
+    },
+    async upsertPendingReview() {
+      return null;
+    },
+    async clearPendingReview() {
+      return null;
+    },
+    async resolveReview() {
+      return null;
+    },
+  });
+
+  assert.equal(review?.id, 'review-1');
+  assert.equal(review?.status, 'pending');
+  assert.equal(review?.confidence, 0.67);
+});

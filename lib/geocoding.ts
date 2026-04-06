@@ -5,6 +5,7 @@ import {
   normalizeRestaurantLocationInput,
   type RestaurantLocationInput,
 } from '@/lib/restaurantLocation';
+import { getGoogleServerApiKey } from '@/lib/googleApiKey';
 
 type GoogleGeocodingResponse = {
   results?: Array<{
@@ -62,7 +63,7 @@ function getAddressComponent(
 export async function geocodeRestaurantLocation(
   input: RestaurantLocationInput
 ): Promise<GeocodeLocationResult> {
-  const apiKey = process.env.GOOGLE_MAPS_GEOCODING_API_KEY;
+  const apiKey = getGoogleServerApiKey();
 
   if (!apiKey) {
     return {

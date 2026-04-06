@@ -21,6 +21,7 @@ export default async function Home() {
   const sections = [
     { label: 'Menu Database', href: '/admin/menu' },
     { label: 'CSV Upload', href: '/admin/csv' },
+    { label: 'Reviews', href: '/admin/reviews' },
     { label: 'Dietary Signals', href: '/admin/dietary-signals' },
     { label: 'Map', href: '/admin/map' },
     { label: 'Users', href: '/admin/users' },

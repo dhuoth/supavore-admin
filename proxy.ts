@@ -10,7 +10,15 @@ function isProtectedPath(pathname: string) {
 }
 
 function isProtectedApiPath(pathname: string) {
-  return pathname === '/api/geocode' || pathname === '/api/restaurants/backfill-locations';
+  return (
+    pathname === '/api/geocode' ||
+    pathname === '/api/restaurants/backfill-locations' ||
+    pathname === '/api/restaurants/enrich-hours' ||
+    pathname === '/api/restaurants/backfill-hours' ||
+    pathname === '/api/restaurants/hours' ||
+    pathname === '/api/admin/reviews' ||
+    pathname.startsWith('/api/admin/reviews/')
+  );
 }
 
 function clearSessionCookies(response: NextResponse) {
@@ -88,5 +96,15 @@ export async function proxy(request: NextRequest) {
 }
 
 export const config = {
-  matcher: ['/', '/admin/:path*', '/api/geocode', '/api/restaurants/backfill-locations'],
+  matcher: [
+    '/',
+    '/admin/:path*',
+    '/api/geocode',
+    '/api/restaurants/backfill-locations',
+    '/api/restaurants/enrich-hours',
+    '/api/restaurants/backfill-hours',
+    '/api/restaurants/hours',
+    '/api/admin/reviews',
+    '/api/admin/reviews/:path*',
+  ],
 };
