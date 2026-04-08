@@ -2,6 +2,7 @@
 
 import Link from 'next/link';
 import { FormEvent, useEffect, useRef, useState } from 'react';
+import { ReviewActions } from '@/app/admin/reviews/review-actions';
 import { formatAdminTimestamp } from '@/lib/adminTimestamp';
 import { geocodeRestaurantLocationViaApi } from '@/lib/geocodingClient';
 import { enrichRestaurantHoursViaApi } from '@/lib/googlePlacesHoursClient';
@@ -210,6 +211,10 @@ function formatHoursDisplayTime(value: string | null | undefined) {
   }
 
   return value.slice(0, 5);
+}
+
+function formatScore(value: unknown) {
+  return typeof value === 'number' ? value.toFixed(2) : '—';
 }
 
 function buildEmptyHoursEditorDays(): HoursEditorDay[] {
@@ -464,6 +469,7 @@ export default function MenuDatabasePage() {
   const [isHoursEditing, setIsHoursEditing] = useState(false);
   const [isHoursSaving, setIsHoursSaving] = useState(false);
   const [isHoursRefreshing, setIsHoursRefreshing] = useState(false);
+  const [isHoursReviewResolving, setIsHoursReviewResolving] = useState(false);
   const [pendingDuplicateCandidate, setPendingDuplicateCandidate] = useState<MenuItemRow | null>(
     null
   );
@@ -1231,6 +1237,36 @@ export default function MenuDatabasePage() {
       setSaveError(getErrorMessage(error));
     } finally {
       setIsHoursRefreshing(false);
+    }
+  };
+
+  const handleHoursReviewResolved = async (
+    resolution: 'approve_candidate_and_sync' | 'reject_candidate'
+  ) => {
+    if (!hoursRecord) {
+      return;
+    }
+
+    setIsHoursReviewResolving(true);
+    setSaveError(null);
+    setSaveMessage(
+      resolution === 'approve_candidate_and_sync'
+        ? 'Approved Google Places candidate and syncing hours...'
+        : 'Rejected Google Places candidate.'
+    );
+
+    try {
+      await loadRestaurantHours(hoursRecord.restaurantId);
+      await fetchMenuItems();
+      setSaveMessage(
+        resolution === 'approve_candidate_and_sync'
+          ? 'Approved Google Places candidate and synced restaurant hours.'
+          : 'Rejected Google Places candidate.'
+      );
+    } catch (error) {
+      setSaveError(getErrorMessage(error));
+    } finally {
+      setIsHoursReviewResolving(false);
     }
   };
 
@@ -2353,7 +2389,7 @@ export default function MenuDatabasePage() {
                         <button
                           type="button"
                           onClick={handleHoursSave}
-                          disabled={isHoursSaving || hoursLoading}
+                          disabled={isHoursSaving || hoursLoading || isHoursReviewResolving}
                           className="inline-flex items-center justify-center rounded-2xl bg-black px-4 py-2 text-sm font-medium text-white transition hover:bg-neutral-800 disabled:cursor-not-allowed disabled:bg-zinc-300"
                         >
                           {isHoursSaving ? 'Saving...' : 'Save Hours'}
@@ -2361,7 +2397,7 @@ export default function MenuDatabasePage() {
                         <button
                           type="button"
                           onClick={handleHoursEditCancel}
-                          disabled={isHoursSaving}
+                          disabled={isHoursSaving || isHoursReviewResolving}
                           className="inline-flex items-center justify-center rounded-2xl border border-zinc-200 bg-white px-4 py-2 text-sm font-medium text-zinc-700 transition hover:bg-zinc-50"
                         >
                           Cancel
@@ -2371,7 +2407,7 @@ export default function MenuDatabasePage() {
                       <button
                         type="button"
                         onClick={() => setIsHoursEditing(true)}
-                        disabled={hoursLoading || !hoursRecord}
+                        disabled={hoursLoading || !hoursRecord || isHoursReviewResolving}
                         className="inline-flex items-center justify-center rounded-2xl border border-zinc-200 bg-white px-4 py-2 text-sm font-medium text-zinc-700 transition hover:bg-zinc-50 disabled:cursor-not-allowed disabled:bg-zinc-100 disabled:text-zinc-400"
                       >
                         Edit Hours
@@ -2380,7 +2416,12 @@ export default function MenuDatabasePage() {
                     <button
                       type="button"
                       onClick={handleHoursRefresh}
-                      disabled={isHoursRefreshing || hoursLoading || !selectedMenuItem.restaurants?.id}
+                      disabled={
+                        isHoursRefreshing ||
+                        hoursLoading ||
+                        isHoursReviewResolving ||
+                        !selectedMenuItem.restaurants?.id
+                      }
                       className="inline-flex items-center justify-center rounded-2xl border border-zinc-200 bg-white px-4 py-2 text-sm font-medium text-zinc-700 transition hover:bg-zinc-50 disabled:cursor-not-allowed disabled:bg-zinc-100 disabled:text-zinc-400"
                     >
                       {isHoursRefreshing ? 'Refreshing...' : 'Refresh Hours from Google'}
@@ -2405,12 +2446,20 @@ export default function MenuDatabasePage() {
                           </p>
                         ) : null}
                       </div>
-                      <Link
-                        href="/admin/reviews"
-                        className="inline-flex items-center justify-center rounded-xl border border-amber-300 bg-white px-4 py-2 text-sm font-medium text-amber-900 transition hover:bg-amber-100"
-                      >
-                        Open Reviews
-                      </Link>
+                      <div className="flex flex-col gap-2 sm:items-end">
+                        <ReviewActions
+                          reviewId={hoursRecord.pendingReviewId}
+                          approveLabel="Approve & Sync"
+                          rejectLabel="Reject"
+                          onResolved={handleHoursReviewResolved}
+                        />
+                        <Link
+                          href="/admin/reviews"
+                          className="inline-flex items-center justify-center rounded-xl border border-amber-300 bg-white px-4 py-2 text-sm font-medium text-amber-900 transition hover:bg-amber-100"
+                        >
+                          Open Reviews
+                        </Link>
+                      </div>
                     </div>
                   </div>
                 ) : null}
@@ -2463,17 +2512,67 @@ export default function MenuDatabasePage() {
                       </p>
                     </div>
                     {hoursRecord.pendingReviewPayload ? (
-                      <div className="rounded-2xl border border-zinc-200 bg-white p-4 sm:col-span-2 xl:col-span-3">
-                        <p className="text-xs text-zinc-500">Review Candidate</p>
-                        <p className="mt-1 text-sm text-zinc-800">
-                          {typeof hoursRecord.pendingReviewPayload.matchedDisplayName === 'string'
-                            ? hoursRecord.pendingReviewPayload.matchedDisplayName
-                            : '—'}
-                          {typeof hoursRecord.pendingReviewPayload.candidateFormattedAddress === 'string'
-                            ? ` · ${hoursRecord.pendingReviewPayload.candidateFormattedAddress}`
-                            : ''}
-                        </p>
-                      </div>
+                      <>
+                        <div className="rounded-2xl border border-zinc-200 bg-white p-4 sm:col-span-2 xl:col-span-3">
+                          <p className="text-xs text-zinc-500">Review Candidate</p>
+                          <p className="mt-1 text-sm font-medium text-zinc-900">
+                            {typeof hoursRecord.pendingReviewPayload.matchedDisplayName === 'string'
+                              ? hoursRecord.pendingReviewPayload.matchedDisplayName
+                              : '—'}
+                          </p>
+                          <p className="mt-1 text-sm text-zinc-600">
+                            {typeof hoursRecord.pendingReviewPayload.candidateFormattedAddress === 'string'
+                              ? hoursRecord.pendingReviewPayload.candidateFormattedAddress
+                              : '—'}
+                          </p>
+                          {typeof hoursRecord.pendingReviewPayload.placeId === 'string' ? (
+                            <p className="mt-2 break-all text-xs text-zinc-500">
+                              Place ID: {hoursRecord.pendingReviewPayload.placeId}
+                            </p>
+                          ) : null}
+                        </div>
+                        <div className="rounded-2xl border border-zinc-200 bg-white p-4 sm:col-span-2 xl:col-span-3">
+                          <p className="text-xs text-zinc-500">Match Signals</p>
+                          <div className="mt-2 grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
+                            <div className="rounded-2xl border border-zinc-100 bg-zinc-50 p-3">
+                              <p className="text-xs text-zinc-500">Raw name</p>
+                              <p className="mt-1 text-sm text-zinc-800">
+                                {formatScore(
+                                  (hoursRecord.pendingReviewPayload.scoreBreakdown as Record<string, unknown> | null)
+                                    ?.rawNameScore
+                                )}
+                              </p>
+                            </div>
+                            <div className="rounded-2xl border border-zinc-100 bg-zinc-50 p-3">
+                              <p className="text-xs text-zinc-500">Normalized name</p>
+                              <p className="mt-1 text-sm text-zinc-800">
+                                {formatScore(
+                                  (hoursRecord.pendingReviewPayload.scoreBreakdown as Record<string, unknown> | null)
+                                    ?.normalizedNameScore
+                                )}
+                              </p>
+                            </div>
+                            <div className="rounded-2xl border border-zinc-100 bg-zinc-50 p-3">
+                              <p className="text-xs text-zinc-500">Address</p>
+                              <p className="mt-1 text-sm text-zinc-800">
+                                {formatScore(
+                                  (hoursRecord.pendingReviewPayload.scoreBreakdown as Record<string, unknown> | null)
+                                    ?.addressScore
+                                )}
+                              </p>
+                            </div>
+                            <div className="rounded-2xl border border-zinc-100 bg-zinc-50 p-3">
+                              <p className="text-xs text-zinc-500">Distance</p>
+                              <p className="mt-1 text-sm text-zinc-800">
+                                {formatScore(
+                                  (hoursRecord.pendingReviewPayload.scoreBreakdown as Record<string, unknown> | null)
+                                    ?.distanceScore
+                                )}
+                              </p>
+                            </div>
+                          </div>
+                        </div>
+                      </>
                     ) : null}
                   </div>
                 ) : null}

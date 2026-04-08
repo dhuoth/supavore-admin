@@ -683,7 +683,7 @@ export default function CsvUploadsPage() {
           <p className="max-w-2xl text-sm text-zinc-600 sm:text-base">
             Upload CSV files for bulk menu database ingestion. Rows are normalized and stored for
             later review and processing. The downloaded template includes only the fields admins
-            need to fill out; location details can still be enriched during upload.
+            need to fill out; location details and operating hours can still be enriched during upload.
           </p>
         </header>
 

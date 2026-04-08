@@ -66,6 +66,9 @@ type QueueDependencies = {
     decisionPayload: Record<string, unknown>;
     resolvedBy?: string | null;
   }) => Promise<string | null>;
+  enrichApprovedGooglePlace: typeof enrichRestaurantHoursFromApprovedGooglePlace;
+  getRestaurantHoursRecord: typeof getRestaurantHoursForAdmin;
+  persistHoursResult: typeof persistRestaurantHoursResult;
 };
 
 function createQueueDependencies(): QueueDependencies {
@@ -177,6 +180,9 @@ function createQueueDependencies(): QueueDependencies {
 
       return error?.message ?? null;
     },
+    enrichApprovedGooglePlace: enrichRestaurantHoursFromApprovedGooglePlace,
+    getRestaurantHoursRecord: getRestaurantHoursForAdmin,
+    persistHoursResult: persistRestaurantHoursResult,
   };
 }
 
@@ -277,7 +283,7 @@ export async function resolveHoursPlaceReview(
       throw new Error('Review item is missing a candidate place ID.');
     }
 
-    const approvedResult = await enrichRestaurantHoursFromApprovedGooglePlace({
+    const approvedResult = await dependencies.enrichApprovedGooglePlace({
       placeId,
       matchedDisplayName: typeof payload.matchedDisplayName === 'string' ? payload.matchedDisplayName : null,
       matchConfidence: typeof review.confidence === 'number' ? review.confidence : null,
@@ -298,7 +304,7 @@ export async function resolveHoursPlaceReview(
             })
           : undefined,
     });
-    const syncResult = await persistRestaurantHoursResult({
+    const syncResult = await dependencies.persistHoursResult({
       restaurantId,
       result: approvedResult,
       force: true,
@@ -321,13 +327,13 @@ export async function resolveHoursPlaceReview(
   }
 
   if (params.resolution === 'reject_candidate') {
-    const currentRecord = await getRestaurantHoursForAdmin(restaurantId);
+    const currentRecord = await dependencies.getRestaurantHoursRecord(restaurantId);
 
     if (!currentRecord) {
       throw new Error('Restaurant not found for review rejection.');
     }
 
-    const rejectSyncResult = await persistRestaurantHoursResult({
+    const rejectSyncResult = await dependencies.persistHoursResult({
       restaurantId,
       result: {
         ok: false,

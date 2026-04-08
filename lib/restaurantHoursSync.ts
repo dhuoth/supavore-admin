@@ -202,7 +202,10 @@ function createServerRestaurantHoursSyncDependencies(): RestaurantHoursSyncDepen
     async upsertReviewForResult(restaurant, result) {
       const queueModule = await import('@/lib/adminReviewQueue');
 
-      if (result.status !== 'review_required_match') {
+      if (
+        result.status !== 'review_required_match' &&
+        result.status !== 'low_confidence_match'
+      ) {
         return null;
       }
 
@@ -390,7 +393,10 @@ async function upsertOrClearReviewForResult(
     return dependencies.clearHoursReview(restaurant.id);
   }
 
-  if (result.status !== 'review_required_match') {
+  if (
+    (result.status !== 'review_required_match' && result.status !== 'low_confidence_match') ||
+    !result.placeId
+  ) {
     return null;
   }
 
@@ -583,7 +589,8 @@ export async function persistRestaurantHoursResult(
     ok:
       params.result.status === 'matched_with_hours' ||
       params.result.status === 'matched_no_hours' ||
-      params.result.status === 'review_required_match',
+      params.result.status === 'review_required_match' ||
+      params.result.status === 'low_confidence_match',
     restaurantId: params.restaurantId,
     status: params.result.status,
     message: params.result.note ?? 'Restaurant hours sync completed.',

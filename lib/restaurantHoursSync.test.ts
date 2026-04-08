@@ -69,6 +69,16 @@ function createDependencies(options?: {
       windowIndex: number;
       source: 'google_places_new';
     }>;
+    scoreBreakdown?: {
+      rawNameScore: number | null;
+      normalizedNameScore: number | null;
+      effectiveNameScore: number | null;
+      addressScore: number | null;
+      distanceScore: number | null;
+    };
+    candidateFormattedAddress?: string | null;
+    candidateLatitude?: number | null;
+    candidateLongitude?: number | null;
     note?: string;
   };
 }) {
@@ -161,7 +171,10 @@ function createDependencies(options?: {
         return pendingReview ? { ...pendingReview } : null;
       },
       async upsertReviewForResult(currentRestaurant: RestaurantRecord, result) {
-        if (result.status !== 'review_required_match') {
+        if (
+          result.status !== 'review_required_match' &&
+          result.status !== 'low_confidence_match'
+        ) {
           return null;
         }
 
@@ -173,6 +186,11 @@ function createDependencies(options?: {
             restaurantName: currentRestaurant.name,
             restaurantAddress: currentRestaurant.address,
             placeId: result.placeId ?? null,
+            matchedDisplayName: result.matchedDisplayName ?? null,
+            candidateFormattedAddress: result.candidateFormattedAddress ?? null,
+            candidateLatitude: result.candidateLatitude ?? null,
+            candidateLongitude: result.candidateLongitude ?? null,
+            scoreBreakdown: result.scoreBreakdown ?? null,
           },
         };
 
@@ -340,6 +358,41 @@ test('persistRestaurantHoursResult queues review_required_match without replacin
   assert.equal(result.status, 'review_required_match');
   assert.deepEqual(state.hours, beforeHours);
   assert.equal(state.pendingReview?.id, 'review-1');
+});
+
+test('persistRestaurantHoursResult queues low_confidence_match with a candidate without replacing rows', async () => {
+  const { dependencies, state } = createDependencies();
+  const beforeHours = state.hours.map((row) => ({ ...row }));
+
+  const result = await persistRestaurantHoursResult(
+    {
+      restaurantId: 'restaurant-1',
+      result: {
+        ok: false,
+        status: 'low_confidence_match',
+        placeId: 'place-low',
+        source: 'google_places_new',
+        matchedDisplayName: 'moonbowls (Healthy Korean Bowls)',
+        matchConfidence: 0.38,
+        candidateFormattedAddress: '123 Main St, Los Angeles, CA 90012',
+        scoreBreakdown: {
+          rawNameScore: 0.38,
+          normalizedNameScore: 0.38,
+          effectiveNameScore: 0.38,
+          addressScore: 0.96,
+          distanceScore: 1,
+        },
+        note: 'Google Places candidate was below the confidence threshold.',
+      },
+    },
+    dependencies
+  );
+
+  assert.equal(result.status, 'low_confidence_match');
+  assert.equal(result.ok, true);
+  assert.deepEqual(state.hours, beforeHours);
+  assert.equal(state.pendingReview?.id, 'review-1');
+  assert.equal(state.pendingReview?.review_payload.matchedDisplayName, 'moonbowls (Healthy Korean Bowls)');
 });
 
 test('syncRestaurantHoursFromGoogle skips non-forced syncs when manual lock is enabled', async () => {

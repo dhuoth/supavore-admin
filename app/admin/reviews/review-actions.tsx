@@ -3,14 +3,24 @@
 import { useRouter } from 'next/navigation';
 import { useState } from 'react';
 
-export function ReviewActions({ reviewId }: { reviewId: string }) {
+type ReviewResolution = 'approve_candidate_and_sync' | 'reject_candidate';
+
+export function ReviewActions({
+  reviewId,
+  onResolved,
+  approveLabel = 'Approve',
+  rejectLabel = 'Reject',
+}: {
+  reviewId: string;
+  onResolved?: (resolution: ReviewResolution) => void | Promise<void>;
+  approveLabel?: string;
+  rejectLabel?: string;
+}) {
   const router = useRouter();
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  const handleResolution = async (
-    resolution: 'approve_candidate_and_sync' | 'reject_candidate'
-  ) => {
+  const handleResolution = async (resolution: ReviewResolution) => {
     setIsSubmitting(true);
     setError(null);
 
@@ -26,6 +36,10 @@ export function ReviewActions({ reviewId }: { reviewId: string }) {
 
       if (!response.ok) {
         throw new Error(payload.error || 'Unable to resolve review right now.');
+      }
+
+      if (onResolved) {
+        await onResolved(resolution);
       }
 
       router.refresh();
@@ -45,7 +59,7 @@ export function ReviewActions({ reviewId }: { reviewId: string }) {
           disabled={isSubmitting}
           className="inline-flex items-center justify-center rounded-xl bg-black px-3 py-2 text-sm font-medium text-white transition hover:bg-neutral-800 disabled:cursor-not-allowed disabled:bg-zinc-400"
         >
-          {isSubmitting ? 'Saving...' : 'Approve'}
+          {isSubmitting ? 'Saving...' : approveLabel}
         </button>
         <button
           type="button"
@@ -53,7 +67,7 @@ export function ReviewActions({ reviewId }: { reviewId: string }) {
           disabled={isSubmitting}
           className="inline-flex items-center justify-center rounded-xl border border-zinc-200 bg-white px-3 py-2 text-sm font-medium text-zinc-700 transition hover:bg-zinc-50 disabled:cursor-not-allowed disabled:bg-zinc-100 disabled:text-zinc-400"
         >
-          Reject
+          {rejectLabel}
         </button>
       </div>
       {error ? <p className="text-xs text-red-600">{error}</p> : null}

@@ -37,7 +37,8 @@ export default async function ReviewsPage() {
           <div className="space-y-2">
             <h1 className="text-4xl font-semibold tracking-tight text-zinc-950">Reviews</h1>
             <p className="max-w-2xl text-sm text-zinc-600 sm:text-base">
-              Review borderline Google Places matches before approving restaurant hours syncs.
+              Review borderline or low-confidence Google Places matches before approving restaurant
+              hours syncs.
             </p>
           </div>
         </div>
@@ -64,6 +65,7 @@ export default async function ReviewsPage() {
                 <tr>
                   <th className="px-5 py-4 font-medium text-zinc-600">Restaurant</th>
                   <th className="px-5 py-4 font-medium text-zinc-600">Candidate</th>
+                  <th className="px-5 py-4 font-medium text-zinc-600">Review Note</th>
                   <th className="px-5 py-4 font-medium text-zinc-600">Confidence</th>
                   <th className="px-5 py-4 font-medium text-zinc-600">Scores</th>
                   <th className="px-5 py-4 font-medium text-zinc-600">Created</th>
@@ -73,7 +75,7 @@ export default async function ReviewsPage() {
               <tbody className="divide-y divide-zinc-100">
                 {reviews.length === 0 ? (
                   <tr>
-                    <td className="px-5 py-8 text-zinc-500" colSpan={6}>
+                    <td className="px-5 py-8 text-zinc-500" colSpan={7}>
                       No pending reviews.
                     </td>
                   </tr>
@@ -117,6 +119,7 @@ export default async function ReviewsPage() {
                           <p className="font-medium text-zinc-900">{candidateName}</p>
                           <p className="mt-1 text-zinc-500">{candidateAddress}</p>
                         </td>
+                        <td className="px-5 py-4 text-zinc-700">{review.summary ?? '—'}</td>
                         <td className="px-5 py-4 text-zinc-700">
                           {review.confidence?.toFixed(2) ?? '—'}
                         </td>
