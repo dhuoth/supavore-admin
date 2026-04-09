@@ -2,19 +2,39 @@
 
 import { useRouter } from 'next/navigation';
 import { useState } from 'react';
+import type {
+  RestaurantMergeDisplayNameStrategy,
+  RestaurantMergeHoursStrategy,
+  RestaurantMergeOnlineOrderingLinkStrategy,
+} from '@/lib/restaurantMergeTypes';
 
-type ReviewResolution = 'approve_candidate_and_sync' | 'reject_candidate';
+type ReviewResolution =
+  | 'approve_candidate_and_sync'
+  | 'reject_candidate'
+  | 'dismiss_without_change'
+  | 'approve_restaurant_merge';
 
 export function ReviewActions({
   reviewId,
   onResolved,
   approveLabel = 'Approve',
   rejectLabel = 'Reject',
+  approveResolution = 'approve_candidate_and_sync',
+  rejectResolution = 'reject_candidate',
+  mergeParams,
 }: {
   reviewId: string;
   onResolved?: (resolution: ReviewResolution) => void | Promise<void>;
   approveLabel?: string;
   rejectLabel?: string;
+  approveResolution?: ReviewResolution;
+  rejectResolution?: ReviewResolution;
+  mergeParams?: {
+    displayNameStrategy?: RestaurantMergeDisplayNameStrategy;
+    customDisplayName?: string | null;
+    onlineOrderingLinkStrategy?: RestaurantMergeOnlineOrderingLinkStrategy;
+    hoursStrategy?: RestaurantMergeHoursStrategy;
+  };
 }) {
   const router = useRouter();
   const [isSubmitting, setIsSubmitting] = useState(false);
@@ -30,7 +50,7 @@ export function ReviewActions({
         headers: {
           'Content-Type': 'application/json',
         },
-        body: JSON.stringify({ resolution }),
+        body: JSON.stringify({ resolution, mergeParams }),
       });
       const payload = (await response.json()) as { error?: string };
 
@@ -55,7 +75,7 @@ export function ReviewActions({
       <div className="flex flex-wrap gap-2">
         <button
           type="button"
-          onClick={() => handleResolution('approve_candidate_and_sync')}
+          onClick={() => handleResolution(approveResolution)}
           disabled={isSubmitting}
           className="inline-flex items-center justify-center rounded-xl bg-black px-3 py-2 text-sm font-medium text-white transition hover:bg-neutral-800 disabled:cursor-not-allowed disabled:bg-zinc-400"
         >
@@ -63,7 +83,7 @@ export function ReviewActions({
         </button>
         <button
           type="button"
-          onClick={() => handleResolution('reject_candidate')}
+          onClick={() => handleResolution(rejectResolution)}
           disabled={isSubmitting}
           className="inline-flex items-center justify-center rounded-xl border border-zinc-200 bg-white px-3 py-2 text-sm font-medium text-zinc-700 transition hover:bg-zinc-50 disabled:cursor-not-allowed disabled:bg-zinc-100 disabled:text-zinc-400"
         >

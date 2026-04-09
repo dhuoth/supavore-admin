@@ -6,10 +6,20 @@ import {
   persistRestaurantHoursResult,
   type RestaurantHoursSyncResult,
 } from '@/lib/restaurantHoursSync';
+import {
+  executeRestaurantMerge,
+  previewRestaurantMerge,
+} from '@/lib/restaurantMerge';
+import type { ExecuteRestaurantMergeParams } from '@/lib/restaurantMergeTypes';
 import { createSupabaseAdminClient } from '@/lib/supabaseAdmin';
 
 export type AdminReviewStatus = 'pending' | 'approved' | 'rejected' | 'dismissed';
-export type AdminReviewType = 'restaurant_hours_place_match';
+export type AdminReviewType = 'restaurant_hours_place_match' | 'restaurant_duplicate_merge';
+export type AdminReviewResolution =
+  | 'approve_candidate_and_sync'
+  | 'reject_candidate'
+  | 'dismiss_without_change'
+  | 'approve_restaurant_merge';
 
 export type AdminReviewQueueItem = {
   id: string;
@@ -69,6 +79,8 @@ type QueueDependencies = {
   enrichApprovedGooglePlace: typeof enrichRestaurantHoursFromApprovedGooglePlace;
   getRestaurantHoursRecord: typeof getRestaurantHoursForAdmin;
   persistHoursResult: typeof persistRestaurantHoursResult;
+  previewRestaurantMerge: typeof previewRestaurantMerge;
+  executeRestaurantMerge: typeof executeRestaurantMerge;
 };
 
 function createQueueDependencies(): QueueDependencies {
@@ -183,6 +195,8 @@ function createQueueDependencies(): QueueDependencies {
     enrichApprovedGooglePlace: enrichRestaurantHoursFromApprovedGooglePlace,
     getRestaurantHoursRecord: getRestaurantHoursForAdmin,
     persistHoursResult: persistRestaurantHoursResult,
+    previewRestaurantMerge,
+    executeRestaurantMerge,
   };
 }
 
@@ -249,6 +263,62 @@ export async function clearHoursPlaceMatchReview(
   dependencies: QueueDependencies = createQueueDependencies()
 ) {
   return dependencies.clearPendingReview('restaurant_hours_place_match', 'restaurant', restaurantId);
+}
+
+export async function upsertRestaurantDuplicateMergeReview(
+  input: {
+    sourceRestaurantId: string;
+    targetRestaurantId: string;
+  },
+  dependencies: QueueDependencies = createQueueDependencies()
+) {
+  const preview = await dependencies.previewRestaurantMerge({
+    sourceRestaurantId: input.sourceRestaurantId,
+    targetRestaurantId: input.targetRestaurantId,
+  });
+
+  const error = await dependencies.upsertPendingReview({
+    reviewType: 'restaurant_duplicate_merge',
+    entityType: 'restaurant',
+    entityId: input.sourceRestaurantId,
+    priority: preview.canMerge ? 'normal' : 'high',
+    source: 'admin_identity_collision',
+    summary: preview.canMerge
+      ? `Duplicate restaurant detected: ${preview.sourceRestaurant.name || 'Unknown'} can merge into ${preview.targetRestaurant.name || 'Unknown'}.`
+      : `Duplicate restaurant detected but merge is blocked by ${preview.conflictSummary || 'conflicts'}.`,
+    confidence: null,
+    reviewPayload: {
+      sourceRestaurantId: preview.sourceRestaurant.id,
+      targetRestaurantId: preview.targetRestaurant.id,
+      sourceRestaurantName: preview.sourceRestaurant.name,
+      sourceRestaurantAddress: preview.sourceRestaurant.address,
+      targetRestaurantName: preview.targetRestaurant.name,
+      targetRestaurantAddress: preview.targetRestaurant.address,
+      identityKey: preview.identityKey,
+      dependentCounts: preview.dependentCounts,
+      conflictSummary: preview.conflictSummary,
+      canMerge: preview.canMerge,
+      menuItemConflicts: preview.menuItemConflicts,
+      hoursConflicts: preview.hoursConflicts,
+    },
+  });
+
+  if (error) {
+    throw new Error(error);
+  }
+
+  return preview;
+}
+
+export async function clearRestaurantDuplicateMergeReview(
+  sourceRestaurantId: string,
+  dependencies: QueueDependencies = createQueueDependencies()
+) {
+  return dependencies.clearPendingReview(
+    'restaurant_duplicate_merge',
+    'restaurant',
+    sourceRestaurantId
+  );
 }
 
 export async function resolveHoursPlaceReview(
@@ -385,4 +455,140 @@ export async function resolveHoursPlaceReview(
     metadataUpdated: false,
     manualLockSkipped: false,
   } satisfies RestaurantHoursSyncResult;
+}
+
+export async function resolveRestaurantDuplicateMergeReview(
+  params: {
+    reviewId: string;
+    resolution: 'approve_restaurant_merge' | 'dismiss_without_change';
+    reviewerUserId?: string | null;
+    mergeParams?: Omit<ExecuteRestaurantMergeParams, 'sourceRestaurantId' | 'targetRestaurantId'>;
+  },
+  dependencies: QueueDependencies = createQueueDependencies()
+) {
+  const review = await dependencies.getReviewById(params.reviewId);
+
+  if (!review) {
+    throw new Error('Review item not found.');
+  }
+
+  if (review.review_type !== 'restaurant_duplicate_merge') {
+    throw new Error('Unsupported review type.');
+  }
+
+  if (review.status !== 'pending') {
+    throw new Error('Review item has already been resolved.');
+  }
+
+  const payload = review.review_payload;
+  const sourceRestaurantId =
+    typeof payload.sourceRestaurantId === 'string' ? payload.sourceRestaurantId : review.entity_id;
+  const targetRestaurantId =
+    typeof payload.targetRestaurantId === 'string' ? payload.targetRestaurantId : '';
+
+  if (!sourceRestaurantId || !targetRestaurantId) {
+    throw new Error('Review item is missing source or target restaurant IDs.');
+  }
+
+  if (params.resolution === 'dismiss_without_change') {
+    const resolveError = await dependencies.resolveReview(params.reviewId, {
+      status: 'dismissed',
+      decisionPayload: {
+        resolution: params.resolution,
+      },
+      resolvedBy: params.reviewerUserId ?? null,
+    });
+
+    if (resolveError) {
+      throw new Error(resolveError);
+    }
+
+    return {
+      ok: true,
+      sourceRestaurantId,
+      targetRestaurantId,
+      dismissed: true,
+    };
+  }
+
+  const mergeResult = await dependencies.executeRestaurantMerge({
+    sourceRestaurantId,
+    targetRestaurantId,
+    displayNameStrategy: params.mergeParams?.displayNameStrategy ?? 'keep_target',
+    customDisplayName: params.mergeParams?.customDisplayName ?? null,
+    onlineOrderingLinkStrategy:
+      params.mergeParams?.onlineOrderingLinkStrategy ?? 'prefer_non_null',
+    hoursStrategy: params.mergeParams?.hoursStrategy ?? 'abort_on_conflict',
+  });
+
+  const resolveError = await dependencies.resolveReview(params.reviewId, {
+    status: 'approved',
+    decisionPayload: {
+      resolution: params.resolution,
+      mergeResult,
+    },
+    resolvedBy: params.reviewerUserId ?? null,
+  });
+
+  if (resolveError) {
+    throw new Error(resolveError);
+  }
+
+  return mergeResult;
+}
+
+export async function resolveAdminReview(
+  params: {
+    reviewId: string;
+    resolution: AdminReviewResolution;
+    reviewerUserId?: string | null;
+    mergeParams?: Omit<ExecuteRestaurantMergeParams, 'sourceRestaurantId' | 'targetRestaurantId'>;
+  },
+  dependencies: QueueDependencies = createQueueDependencies()
+) {
+  const review = await dependencies.getReviewById(params.reviewId);
+
+  if (!review) {
+    throw new Error('Review item not found.');
+  }
+
+  if (review.review_type === 'restaurant_hours_place_match') {
+    if (
+      params.resolution !== 'approve_candidate_and_sync' &&
+      params.resolution !== 'reject_candidate' &&
+      params.resolution !== 'dismiss_without_change'
+    ) {
+      throw new Error('Invalid resolution for restaurant hours review.');
+    }
+
+    return resolveHoursPlaceReview(
+      {
+        reviewId: params.reviewId,
+        resolution: params.resolution,
+        reviewerUserId: params.reviewerUserId,
+      },
+      dependencies
+    );
+  }
+
+  if (review.review_type === 'restaurant_duplicate_merge') {
+    if (
+      params.resolution !== 'approve_restaurant_merge' &&
+      params.resolution !== 'dismiss_without_change'
+    ) {
+      throw new Error('Invalid resolution for restaurant merge review.');
+    }
+
+    return resolveRestaurantDuplicateMergeReview(
+      {
+        reviewId: params.reviewId,
+        resolution: params.resolution,
+        reviewerUserId: params.reviewerUserId,
+        mergeParams: params.mergeParams,
+      },
+      dependencies
+    );
+  }
+
+  throw new Error('Unsupported review type.');
 }

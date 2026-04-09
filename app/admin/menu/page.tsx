@@ -11,6 +11,7 @@ import {
   type RestaurantHoursBackfillItem,
 } from '@/lib/restaurantHoursBackfill';
 import {
+  canonicalizeRestaurantIdentity,
   canonicalizeDietaryCompliance,
   dietaryOptions,
   normalizeMenuItemPayload,
@@ -19,6 +20,15 @@ import {
   normalizeWhitespace,
   type DietaryOption,
 } from '@/lib/menuNormalization';
+import {
+  createRestaurantDuplicateMergeReview,
+  mergeRestaurants,
+} from '@/lib/restaurantMergeClient';
+import type {
+  RestaurantMergeDisplayNameStrategy,
+  RestaurantMergeOnlineOrderingLinkStrategy,
+  RestaurantMergePreview,
+} from '@/lib/restaurantMergeTypes';
 import {
   backfillRestaurantLocations,
   type RestaurantLocationBackfillItem,
@@ -44,6 +54,7 @@ type MenuItemRow = {
   is_active: boolean;
   restaurants: {
     id: string;
+    created_at?: string;
     name: string | null;
     address: string | null;
     city: string | null;
@@ -62,6 +73,32 @@ type MenuItemRow = {
     place_name_from_source?: string | null;
     hours_is_manually_managed?: boolean;
   } | null;
+};
+
+type RestaurantIdentityCandidate = {
+  id: string;
+  created_at: string;
+  name: string | null;
+  address: string | null;
+  city: string | null;
+  region: string | null;
+  postal_code: string | null;
+  latitude: number | null;
+  longitude: number | null;
+  online_ordering_link: string | null;
+  is_active: boolean | null;
+};
+
+type DuplicateCollisionState = {
+  status: 'loading_preview' | 'ready' | 'preview_failed' | 'multiple_targets';
+  sourceRestaurantId: string;
+  targetRestaurantId?: string;
+  sourceRestaurantName: string | null;
+  sourceRestaurantAddress: string | null;
+  targetRestaurantName?: string | null;
+  targetRestaurantAddress?: string | null;
+  message: string;
+  previewError?: string | null;
 };
 
 type RawMenuItemRow = Omit<MenuItemRow, 'restaurants'> & {
@@ -441,9 +478,51 @@ function buildDrawerEditState(menuItem: MenuItemRow): DrawerEditState {
   };
 }
 
+function sortRestaurantCandidates(candidates: RestaurantIdentityCandidate[]) {
+  return [...candidates].sort((left, right) => {
+    if (left.created_at !== right.created_at) {
+      return left.created_at.localeCompare(right.created_at);
+    }
+
+    return left.id.localeCompare(right.id);
+  });
+}
+
+function getCanonicalMergePair(
+  candidates: RestaurantIdentityCandidate[],
+  currentRestaurantId?: string | null
+) {
+  const sortedCandidates = sortRestaurantCandidates(candidates);
+
+  if (currentRestaurantId) {
+    const sourceCandidate = sortedCandidates.find((candidate) => candidate.id === currentRestaurantId);
+    const targetCandidate = sortedCandidates.find((candidate) => candidate.id !== currentRestaurantId);
+
+    if (!sourceCandidate || !targetCandidate) {
+      return null;
+    }
+
+    return {
+      sourceRestaurantId: sourceCandidate.id,
+      targetRestaurantId: targetCandidate.id,
+    };
+  }
+
+  if (sortedCandidates.length < 2) {
+    return null;
+  }
+
+  return {
+    sourceRestaurantId: sortedCandidates[1]!.id,
+    targetRestaurantId: sortedCandidates[0]!.id,
+  };
+}
+
 export default function MenuDatabasePage() {
   const maxVisibleBackfillWarnings = 5;
   const formRef = useRef<HTMLFormElement>(null);
+  const mergePanelRef = useRef<HTMLDivElement | null>(null);
+  const mergePanelPrimaryActionRef = useRef<HTMLButtonElement | null>(null);
   const [noModifications, setNoModifications] = useState(true);
   const [selectedDietaryOptions, setSelectedDietaryOptions] = useState<DietaryOption[]>([]);
   const [menuItems, setMenuItems] = useState<MenuItemRow[]>([]);
@@ -477,6 +556,18 @@ export default function MenuDatabasePage() {
     null
   );
   const [duplicateOverrideConfirmed, setDuplicateOverrideConfirmed] = useState(false);
+  const [restaurantMergePreview, setRestaurantMergePreview] = useState<RestaurantMergePreview | null>(
+    null
+  );
+  const [isRestaurantMerging, setIsRestaurantMerging] = useState(false);
+  const [mergeDisplayNameStrategy, setMergeDisplayNameStrategy] =
+    useState<RestaurantMergeDisplayNameStrategy>('keep_target');
+  const [mergeCustomDisplayName, setMergeCustomDisplayName] = useState('');
+  const [mergeOnlineOrderingLinkStrategy, setMergeOnlineOrderingLinkStrategy] =
+    useState<RestaurantMergeOnlineOrderingLinkStrategy>('prefer_non_null');
+  const [duplicateCollisionState, setDuplicateCollisionState] =
+    useState<DuplicateCollisionState | null>(null);
+  const [mergePanelIntent, setMergePanelIntent] = useState<'duplicate_collision' | null>(null);
   const [searchQuery, setSearchQuery] = useState('');
   const [statusFilter, setStatusFilter] = useState<'All' | 'Active' | 'Inactive'>('All');
 
@@ -499,6 +590,7 @@ export default function MenuDatabasePage() {
         is_active,
         restaurants (
           id,
+          created_at,
           name,
           address,
           city,
@@ -536,6 +628,95 @@ export default function MenuDatabasePage() {
     return rows;
   };
 
+  const resetRestaurantMergeState = () => {
+    setRestaurantMergePreview(null);
+    setIsRestaurantMerging(false);
+    setMergeDisplayNameStrategy('keep_target');
+    setMergeCustomDisplayName('');
+    setMergeOnlineOrderingLinkStrategy('prefer_non_null');
+    setDuplicateCollisionState(null);
+    setMergePanelIntent(null);
+  };
+
+  const loadRestaurantIdentityCandidates = async (identityKey: string | null) => {
+    if (!identityKey) {
+      return [];
+    }
+
+    const { data, error } = await supabase
+      .from('restaurants')
+      .select(
+        'id, created_at, name, address, city, region, postal_code, latitude, longitude, online_ordering_link, is_active'
+      );
+
+    if (error) {
+      throw error;
+    }
+
+    return ((data as RestaurantIdentityCandidate[] | null) ?? []).filter(
+      (candidate) => canonicalizeRestaurantIdentity(candidate.name, candidate.address) === identityKey
+    );
+  };
+
+  const queueRestaurantMergeReview = async (input: {
+    sourceRestaurantId: string;
+    targetRestaurantId: string;
+  }) => {
+    const result = await createRestaurantDuplicateMergeReview(input);
+    setRestaurantMergePreview(result.preview);
+    setDuplicateCollisionState({
+      status: 'ready',
+      sourceRestaurantId: result.preview.sourceRestaurant.id,
+      targetRestaurantId: result.preview.targetRestaurant.id,
+      sourceRestaurantName: result.preview.sourceRestaurant.name,
+      sourceRestaurantAddress: result.preview.sourceRestaurant.address,
+      targetRestaurantName: result.preview.targetRestaurant.name,
+      targetRestaurantAddress: result.preview.targetRestaurant.address,
+      message:
+        'A restaurant with this name and address already exists. Do you want to merge this restaurant into the existing record?',
+      previewError: null,
+    });
+    setMergeDisplayNameStrategy('keep_target');
+    setMergeCustomDisplayName('');
+    setMergeOnlineOrderingLinkStrategy('prefer_non_null');
+    return result.preview;
+  };
+
+  const rebindDrawerAfterMerge = async (params: {
+    targetRestaurantId: string;
+    previousMenuItemId: string;
+    previousCanonicalName: string | null;
+  }) => {
+    const updatedRows = await fetchMenuItems();
+    const refreshedMenuItem =
+      updatedRows.find((item) => item.id === params.previousMenuItemId) ||
+      updatedRows.find(
+        (item) =>
+          item.restaurants?.id === params.targetRestaurantId &&
+          item.canonical_name === params.previousCanonicalName
+      ) ||
+      updatedRows.find((item) => item.restaurants?.id === params.targetRestaurantId) ||
+      null;
+
+    setSelectedMenuItem(refreshedMenuItem);
+    setIsEditing(false);
+    setEditingMenuItemId(null);
+  };
+
+  useEffect(() => {
+    if (mergePanelIntent !== 'duplicate_collision' || !duplicateCollisionState) {
+      return;
+    }
+
+    mergePanelRef.current?.scrollIntoView({
+      behavior: 'smooth',
+      block: 'start',
+    });
+
+    const focusTarget = mergePanelPrimaryActionRef.current ?? mergePanelRef.current;
+    focusTarget?.focus();
+  }, [duplicateCollisionState, mergePanelIntent]);
+
   const handleDietaryOptionChange = (option: DietaryOption) => {
     setSelectedDietaryOptions((current) => {
       const nextValues = current.includes(option)
@@ -557,6 +738,7 @@ export default function MenuDatabasePage() {
     setSaveError(null);
     setPendingDuplicateCandidate(null);
     setDuplicateOverrideConfirmed(false);
+    resetRestaurantMergeState();
   };
 
   const handleCloseDrawer = () => {
@@ -568,11 +750,13 @@ export default function MenuDatabasePage() {
     setHoursRecord(null);
     setHoursEditorDays(buildEmptyHoursEditorDays());
     setHoursLoadError(null);
+    resetRestaurantMergeState();
   };
 
   const handleCancelEdit = () => {
     setIsEditing(false);
     setEditingMenuItemId(null);
+    resetRestaurantMergeState();
     if (selectedMenuItem) {
       setDrawerEditState(buildDrawerEditState(selectedMenuItem));
     } else {
@@ -590,31 +774,38 @@ export default function MenuDatabasePage() {
     shouldUpdateExistingLink: boolean;
     shouldRefreshLocation: boolean;
   }) => {
+    const requestedIdentityKey = canonicalizeRestaurantIdentity(
+      params.restaurantName,
+      params.restaurantAddress
+    );
     const { data: restaurantCandidates, error: restaurantFetchError } = await supabase
       .from('restaurants')
       .select(
-        'id, name, address, city, region, postal_code, latitude, longitude, online_ordering_link'
+        'id, created_at, name, address, city, region, postal_code, latitude, longitude, online_ordering_link, is_active'
       );
 
     if (restaurantFetchError) {
       throw restaurantFetchError;
     }
 
-    const matchingRestaurant = (restaurantCandidates || []).find((restaurant) => {
-      const normalizedCandidate = normalizeRestaurantPayload({
-        restaurantName: restaurant.name,
-        restaurantAddress: restaurant.address,
-        restaurantCity: restaurant.city,
-        restaurantRegion: restaurant.region,
-        restaurantPostalCode: restaurant.postal_code,
-        onlineOrderingLink: null,
-      });
+    const matchingRestaurants = ((restaurantCandidates as RestaurantIdentityCandidate[] | null) ?? []).filter(
+      (restaurant) =>
+        canonicalizeRestaurantIdentity(restaurant.name, restaurant.address) === requestedIdentityKey
+    );
 
-      return (
-        normalizedCandidate.name === params.restaurantName &&
-        normalizedCandidate.address === params.restaurantAddress
+    if (matchingRestaurants.length > 1) {
+      const mergePair = getCanonicalMergePair(matchingRestaurants);
+
+      if (mergePair) {
+        await queueRestaurantMergeReview(mergePair);
+      }
+
+      throw new Error(
+        'Multiple restaurants already share this restaurant identity. Merge the duplicate restaurant records before adding more menu items.'
       );
-    });
+    }
+
+    const matchingRestaurant = matchingRestaurants[0] ?? null;
 
     const restaurantLocationInput = {
       address: params.restaurantAddress,
@@ -905,6 +1096,7 @@ export default function MenuDatabasePage() {
       const { error: menuItemInsertError } = await supabase.from('menu_items').insert({
         restaurant_id: restaurantId,
         name: menuItemPayload.name,
+        canonical_name: canonicalizeMenuItemName(menuItemPayload.name),
         base_price: menuItemPayload.basePrice,
         recommended_modification: finalModification,
         price_with_modification: finalPriceWithModification,
@@ -994,31 +1186,220 @@ export default function MenuDatabasePage() {
         throw new Error('Menu item update failed: missing restaurant reference.');
       }
 
-      const { restaurantId, geocodeWarning } = await resolveRestaurantId({
-        restaurantName: restaurantPayload.name,
-        restaurantAddress: restaurantPayload.address,
-        restaurantCity: restaurantPayload.city,
-        restaurantRegion: restaurantPayload.region,
-        restaurantPostalCode: restaurantPayload.postalCode,
-        onlineOrderingLink: restaurantPayload.onlineOrderingLink,
-        shouldUpdateExistingLink: true,
-        shouldRefreshLocation: restaurantLocationChanged(
-          {
-            address: existingRestaurant.address,
-            city: existingRestaurant.city,
-            region: existingRestaurant.region,
-            postalCode: existingRestaurant.postal_code,
-          },
-          {
-            address: restaurantPayload.address,
-            city: restaurantPayload.city,
-            region: restaurantPayload.region,
-            postalCode: restaurantPayload.postalCode,
-          }
-        ),
+      const requestedIdentityKey = canonicalizeRestaurantIdentity(
+        restaurantPayload.name,
+        restaurantPayload.address
+      );
+      const identityMatches = await loadRestaurantIdentityCandidates(requestedIdentityKey);
+      console.log('Restaurant identity collision check', {
+        requestedIdentityKey,
+        currentRestaurantId: existingRestaurant.id,
+        matchesFound: identityMatches.length,
+        matchIds: identityMatches.map((candidate) => candidate.id),
       });
+      const conflictingRestaurants = identityMatches.filter(
+        (candidate) => candidate.id !== existingRestaurant.id
+      );
 
-      menuItemUpdatePayload.restaurant_id = restaurantId;
+      if (conflictingRestaurants.length > 0) {
+        const currentRestaurantCandidate = {
+          id: existingRestaurant.id,
+          created_at: existingRestaurant.created_at || selectedMenuItem.created_at,
+          name: existingRestaurant.name,
+          address: existingRestaurant.address,
+          city: existingRestaurant.city,
+          region: existingRestaurant.region,
+          postal_code: existingRestaurant.postal_code,
+          latitude: existingRestaurant.latitude,
+          longitude: existingRestaurant.longitude,
+          online_ordering_link: existingRestaurant.online_ordering_link,
+          is_active: true,
+        };
+        const allConflictingCandidates = [currentRestaurantCandidate, ...conflictingRestaurants];
+
+        if (conflictingRestaurants.length > 1) {
+          resetRestaurantMergeState();
+          setDuplicateCollisionState({
+            status: 'multiple_targets',
+            sourceRestaurantId: existingRestaurant.id,
+            sourceRestaurantName: restaurantPayload.name,
+            sourceRestaurantAddress: restaurantPayload.address,
+            targetRestaurantId: undefined,
+            message:
+              'More than one existing restaurant already matches this name and address. Choose a merge target from Reviews.',
+            previewError: null,
+          });
+          setSaveError(null);
+          setSaveMessage('Multiple matching restaurants were found. Choose a merge target to continue.');
+          setMergePanelIntent('duplicate_collision');
+          throw new Error('skip_generic_error');
+        }
+
+        const mergePair = getCanonicalMergePair(allConflictingCandidates, existingRestaurant.id);
+        console.log('Restaurant identity merge pair', {
+          requestedIdentityKey,
+          mergePair,
+        });
+
+        if (!mergePair) {
+          resetRestaurantMergeState();
+          setDuplicateCollisionState({
+            status: 'preview_failed',
+            sourceRestaurantId: existingRestaurant.id,
+            sourceRestaurantName: restaurantPayload.name,
+            sourceRestaurantAddress: restaurantPayload.address,
+            targetRestaurantId: undefined,
+            message:
+              'We found an existing restaurant with this name and address, but could not prepare the merge details right now.',
+            previewError:
+              'The matching restaurant could not be selected automatically. Open Reviews to resolve it.',
+          });
+          setSaveError(null);
+          setSaveMessage('A duplicate restaurant was found, but merge details could not be prepared.');
+          setMergePanelIntent('duplicate_collision');
+          throw new Error('skip_generic_error');
+        }
+
+        setDuplicateCollisionState({
+          status: 'loading_preview',
+          sourceRestaurantId: existingRestaurant.id,
+          targetRestaurantId: mergePair.targetRestaurantId,
+          sourceRestaurantName: restaurantPayload.name,
+          sourceRestaurantAddress: restaurantPayload.address,
+          targetRestaurantName:
+            conflictingRestaurants.find((candidate) => candidate.id === mergePair.targetRestaurantId)
+              ?.name ?? null,
+          targetRestaurantAddress:
+            conflictingRestaurants.find((candidate) => candidate.id === mergePair.targetRestaurantId)
+              ?.address ?? null,
+          message:
+            'A restaurant with this name and address already exists. Preparing merge confirmation...',
+          previewError: null,
+        });
+        setMergePanelIntent('duplicate_collision');
+        try {
+          await queueRestaurantMergeReview(mergePair);
+          console.log('Restaurant identity merge preview ready', {
+            requestedIdentityKey,
+            sourceRestaurantId: mergePair.sourceRestaurantId,
+            targetRestaurantId: mergePair.targetRestaurantId,
+          });
+        } catch (error) {
+          setRestaurantMergePreview(null);
+          setDuplicateCollisionState({
+            status: 'preview_failed',
+            sourceRestaurantId: existingRestaurant.id,
+            targetRestaurantId: mergePair.targetRestaurantId,
+            sourceRestaurantName: restaurantPayload.name,
+            sourceRestaurantAddress: restaurantPayload.address,
+            targetRestaurantName:
+              conflictingRestaurants.find((candidate) => candidate.id === mergePair.targetRestaurantId)
+                ?.name ?? null,
+            targetRestaurantAddress:
+              conflictingRestaurants.find((candidate) => candidate.id === mergePair.targetRestaurantId)
+                ?.address ?? null,
+            message:
+              'We found an existing restaurant with this name and address, but could not prepare the merge details right now.',
+            previewError:
+              error instanceof Error
+                ? error.message
+                : 'Unable to load merge details right now.',
+          });
+          console.warn('Restaurant identity merge preview failed', {
+            requestedIdentityKey,
+            sourceRestaurantId: mergePair.sourceRestaurantId,
+            targetRestaurantId: mergePair.targetRestaurantId,
+            message: error instanceof Error ? error.message : 'Unknown error',
+          });
+          setSaveError(null);
+          setSaveMessage(
+            error instanceof Error
+              ? `A duplicate restaurant was found, but merge details could not be prepared: ${error.message}`
+              : 'A duplicate restaurant was found, but merge details could not be prepared right now.'
+          );
+          setMergePanelIntent('duplicate_collision');
+          throw new Error('skip_generic_error');
+        }
+
+        setSaveError(null);
+        setSaveMessage(
+          'A matching restaurant already exists for this address. Confirm whether you want to merge into the existing restaurant.'
+        );
+        throw new Error('skip_generic_error');
+      }
+
+      resetRestaurantMergeState();
+
+      const restaurantLocationInput = {
+        address: restaurantPayload.address,
+        city: restaurantPayload.city,
+        region: restaurantPayload.region,
+        postalCode: restaurantPayload.postalCode,
+      };
+      const shouldRefreshLocation = restaurantLocationChanged(
+        {
+          address: existingRestaurant.address,
+          city: existingRestaurant.city,
+          region: existingRestaurant.region,
+          postalCode: existingRestaurant.postal_code,
+        },
+        restaurantLocationInput
+      );
+      const shouldGeocode =
+        restaurantLocationHasMeaningfulInput(restaurantLocationInput) &&
+        (shouldRefreshLocation ||
+          existingRestaurant.latitude === null ||
+          existingRestaurant.longitude === null);
+      const geocodeResult = shouldGeocode
+        ? await geocodeRestaurantLocationViaApi(restaurantLocationInput)
+        : null;
+      const restaurantLocation = mergeRestaurantLocation(
+        restaurantLocationInput,
+        geocodeResult?.ok ? geocodeResult.data : null
+      );
+      const restaurantWritePayload = {
+        name: restaurantPayload.name,
+        address: restaurantLocation.address,
+        city: restaurantLocation.city,
+        region: restaurantLocation.region,
+        postal_code: restaurantLocation.postal_code,
+        latitude: restaurantLocation.latitude,
+        longitude: restaurantLocation.longitude,
+        online_ordering_link: restaurantPayload.onlineOrderingLink,
+        is_active: true,
+      };
+
+      const shouldUpdateRestaurant =
+        existingRestaurant.name !== restaurantWritePayload.name ||
+        existingRestaurant.address !== restaurantWritePayload.address ||
+        existingRestaurant.city !== restaurantWritePayload.city ||
+        existingRestaurant.region !== restaurantWritePayload.region ||
+        existingRestaurant.postal_code !== restaurantWritePayload.postal_code ||
+        existingRestaurant.latitude !== restaurantWritePayload.latitude ||
+        existingRestaurant.longitude !== restaurantWritePayload.longitude ||
+        normalizeOptionalText(existingRestaurant.online_ordering_link) !==
+          restaurantWritePayload.online_ordering_link;
+
+      if (shouldUpdateRestaurant) {
+        const { error: restaurantUpdateError } = await supabase
+          .from('restaurants')
+          .update(restaurantWritePayload)
+          .eq('id', existingRestaurant.id);
+
+        if (restaurantUpdateError) {
+          throw restaurantUpdateError;
+        }
+
+        triggerRestaurantHoursEnrichment({
+          restaurantId: existingRestaurant.id,
+          restaurantName: restaurantWritePayload.name,
+          address: restaurantWritePayload.address,
+          latitude: restaurantWritePayload.latitude,
+          longitude: restaurantWritePayload.longitude,
+        });
+      }
+
+      menuItemUpdatePayload.restaurant_id = existingRestaurant.id;
 
       const { data: updatedMenuItemRow, error: menuItemUpdateError } = await supabase
         .from('menu_items')
@@ -1040,9 +1421,14 @@ export default function MenuDatabasePage() {
       setIsEditing(false);
       setEditingMenuItemId(null);
       setSaveMessage(
-        geocodeWarning ? `Menu item updated. ${geocodeWarning}` : 'Menu item updated.'
+        geocodeResult && !geocodeResult.ok
+          ? `Menu item updated. ${geocodeResult.warning}`
+          : 'Menu item updated.'
       );
     } catch (error) {
+      if (error instanceof Error && error.message === 'skip_generic_error') {
+        return;
+      }
       console.error('Error updating menu item:', error);
       setSaveError(error instanceof Error ? error.message : 'Unable to update menu item right now.');
     } finally {
@@ -1984,6 +2370,225 @@ export default function MenuDatabasePage() {
 
               {saveError ? <p className="mt-4 text-sm text-red-600">{saveError}</p> : null}
               {saveMessage ? <p className="mt-4 text-sm text-zinc-600">{saveMessage}</p> : null}
+              {duplicateCollisionState ? (
+                <div
+                  ref={mergePanelRef}
+                  tabIndex={-1}
+                  className="mt-4 rounded-3xl border-2 border-amber-300 bg-amber-50 p-5 shadow-sm outline-none"
+                >
+                  <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
+                    <div>
+                      <p className="text-sm font-semibold text-amber-950">
+                        Merge Duplicate Restaurants?
+                      </p>
+                      <p className="mt-1 text-sm text-amber-900">
+                        {duplicateCollisionState.message}
+                      </p>
+                      <p className="mt-2 text-sm text-amber-900">
+                        Current row: <strong>{duplicateCollisionState.sourceRestaurantName || 'Unknown'}</strong>
+                        {' at '}
+                        <strong>{duplicateCollisionState.sourceRestaurantAddress || '—'}</strong>
+                      </p>
+                      <p className="mt-1 text-xs text-amber-800">
+                        Restaurant ID: {duplicateCollisionState.sourceRestaurantId}
+                      </p>
+                      {duplicateCollisionState.targetRestaurantName ||
+                      duplicateCollisionState.targetRestaurantAddress ? (
+                        <>
+                          <p className="mt-1 text-sm text-amber-900">
+                            Existing restaurant: <strong>{duplicateCollisionState.targetRestaurantName || 'Unknown'}</strong>
+                            {' at '}
+                            <strong>{duplicateCollisionState.targetRestaurantAddress || '—'}</strong>
+                          </p>
+                          {duplicateCollisionState.targetRestaurantId ? (
+                            <p className="mt-1 text-xs text-amber-800">
+                              Existing Restaurant ID: {duplicateCollisionState.targetRestaurantId}
+                            </p>
+                          ) : null}
+                        </>
+                      ) : null}
+                    </div>
+                    <Link href="/admin/reviews" className="text-xs text-amber-900 underline">
+                      Open Reviews
+                    </Link>
+                  </div>
+
+                  {duplicateCollisionState.status === 'loading_preview' ? (
+                    <p className="mt-4 text-sm text-amber-900">Preparing merge confirmation...</p>
+                  ) : null}
+
+                  {duplicateCollisionState.status === 'preview_failed' ? (
+                    <p className="mt-4 text-sm text-red-700">
+                      {duplicateCollisionState.previewError ||
+                        'We found a duplicate, but could not prepare merge details right now.'}
+                    </p>
+                  ) : null}
+
+                  {duplicateCollisionState.status === 'multiple_targets' ? (
+                    <p className="mt-4 text-sm text-red-700">
+                      More than one duplicate target was found. Resolve this duplicate from Reviews.
+                    </p>
+                  ) : null}
+
+                  {duplicateCollisionState.status === 'ready' && restaurantMergePreview ? (
+                    <>
+                      <div className="mt-4 grid gap-4 sm:grid-cols-3">
+                        <div className="rounded-2xl border border-amber-200 bg-white p-4 text-sm text-zinc-800">
+                          <p className="text-xs text-zinc-500">Source dependencies</p>
+                          <p className="mt-1">{`${restaurantMergePreview.dependentCounts.sourceMenuItems} menu items`}</p>
+                          <p>{`${restaurantMergePreview.dependentCounts.sourceHours} hours rows`}</p>
+                          <p>{`${restaurantMergePreview.dependentCounts.sourceSelections} selections`}</p>
+                        </div>
+                        <div className="rounded-2xl border border-amber-200 bg-white p-4 text-sm text-zinc-800">
+                          <p className="text-xs text-zinc-500">Target dependencies</p>
+                          <p className="mt-1">{`${restaurantMergePreview.dependentCounts.targetMenuItems} menu items`}</p>
+                          <p>{`${restaurantMergePreview.dependentCounts.targetHours} hours rows`}</p>
+                          <p>{`${restaurantMergePreview.dependentCounts.targetSelections} selections`}</p>
+                        </div>
+                        <div className="rounded-2xl border border-amber-200 bg-white p-4 text-sm text-zinc-800">
+                          <p className="text-xs text-zinc-500">Conflict summary</p>
+                          <p className="mt-1">
+                            {restaurantMergePreview.conflictSummary || 'No blocking conflicts detected.'}
+                          </p>
+                        </div>
+                      </div>
+
+                      <div className="mt-4 grid gap-4 sm:grid-cols-2">
+                        <div>
+                          <FieldLabel htmlFor="merge-display-name-strategy" label="Display Name Strategy" />
+                          <select
+                            id="merge-display-name-strategy"
+                            value={mergeDisplayNameStrategy}
+                            onChange={(event) =>
+                              setMergeDisplayNameStrategy(
+                                event.target.value as RestaurantMergeDisplayNameStrategy
+                              )
+                            }
+                            className={textInputClassName}
+                          >
+                            <option value="keep_target">Keep target restaurant name</option>
+                            <option value="keep_source">Keep source restaurant name</option>
+                            <option value="custom">Use custom restaurant name</option>
+                          </select>
+                        </div>
+
+                        <div>
+                          <FieldLabel htmlFor="merge-ordering-link-strategy" label="Ordering Link Strategy" />
+                          <select
+                            id="merge-ordering-link-strategy"
+                            value={mergeOnlineOrderingLinkStrategy}
+                            onChange={(event) =>
+                              setMergeOnlineOrderingLinkStrategy(
+                                event.target.value as RestaurantMergeOnlineOrderingLinkStrategy
+                              )
+                            }
+                            className={textInputClassName}
+                          >
+                            <option value="prefer_non_null">Prefer whichever link is present</option>
+                            <option value="prefer_target">Keep target link</option>
+                            <option value="prefer_source">Keep source link</option>
+                          </select>
+                        </div>
+                      </div>
+
+                      {mergeDisplayNameStrategy === 'custom' ? (
+                        <div className="mt-4">
+                          <FieldLabel htmlFor="merge-custom-display-name" label="Custom Display Name" required />
+                          <input
+                            id="merge-custom-display-name"
+                            type="text"
+                            value={mergeCustomDisplayName}
+                            onChange={(event) => setMergeCustomDisplayName(event.target.value)}
+                            className={textInputClassName}
+                          />
+                        </div>
+                      ) : null}
+
+                      {restaurantMergePreview.menuItemConflicts.length > 0 ? (
+                        <p className="mt-4 text-sm text-red-700">
+                          Menu item conflicts: {restaurantMergePreview.menuItemConflicts.length}. Resolve those
+                          records first, then retry the merge.
+                        </p>
+                      ) : null}
+
+                      {restaurantMergePreview.hoursConflicts.length > 0 ? (
+                        <p className="mt-2 text-sm text-red-700">
+                          Hours conflicts: {restaurantMergePreview.hoursConflicts.length}. Resolve those hour
+                          windows first, then retry the merge.
+                        </p>
+                      ) : null}
+
+                      <div className="mt-5 flex flex-wrap gap-3">
+                        <button
+                          ref={mergePanelPrimaryActionRef}
+                          type="button"
+                          disabled={
+                            isRestaurantMerging ||
+                            !restaurantMergePreview.canMerge ||
+                            (mergeDisplayNameStrategy === 'custom' && !mergeCustomDisplayName.trim())
+                          }
+                          onClick={async () => {
+                            setIsRestaurantMerging(true);
+                            setSaveError(null);
+                            setSaveMessage(null);
+
+                            try {
+                              const mergeResult = await mergeRestaurants({
+                                sourceRestaurantId: restaurantMergePreview.sourceRestaurant.id,
+                                targetRestaurantId: restaurantMergePreview.targetRestaurant.id,
+                                displayNameStrategy: mergeDisplayNameStrategy,
+                                customDisplayName:
+                                  mergeDisplayNameStrategy === 'custom'
+                                    ? mergeCustomDisplayName.trim()
+                                    : null,
+                                onlineOrderingLinkStrategy: mergeOnlineOrderingLinkStrategy,
+                                hoursStrategy: 'abort_on_conflict',
+                              });
+                              const targetRestaurantId =
+                                typeof mergeResult.targetRestaurantId === 'string'
+                                  ? mergeResult.targetRestaurantId
+                                  : restaurantMergePreview.targetRestaurant.id;
+
+                              await rebindDrawerAfterMerge({
+                                targetRestaurantId,
+                                previousMenuItemId: selectedMenuItem.id,
+                                previousCanonicalName: selectedMenuItem.canonical_name,
+                              });
+                              resetRestaurantMergeState();
+                              setSaveMessage('Restaurants merged successfully.');
+                            } catch (error) {
+                              setSaveError(getErrorMessage(error));
+                            } finally {
+                              setIsRestaurantMerging(false);
+                            }
+                          }}
+                          className="inline-flex items-center justify-center rounded-2xl bg-black px-4 py-2 text-sm font-medium text-white transition hover:bg-neutral-800 disabled:cursor-not-allowed disabled:bg-zinc-300"
+                        >
+                          {isRestaurantMerging ? 'Merging...' : 'Merge Restaurants'}
+                        </button>
+                        <button
+                          type="button"
+                          onClick={resetRestaurantMergeState}
+                          disabled={isRestaurantMerging}
+                          className="inline-flex items-center justify-center rounded-2xl border border-zinc-200 bg-white px-4 py-2 text-sm font-medium text-zinc-700 transition hover:bg-zinc-50"
+                        >
+                          Cancel
+                        </button>
+                      </div>
+                    </>
+                  ) : (
+                    <div className="mt-5 flex flex-wrap gap-3">
+                      <button
+                        type="button"
+                        onClick={resetRestaurantMergeState}
+                        className="inline-flex items-center justify-center rounded-2xl border border-zinc-200 bg-white px-4 py-2 text-sm font-medium text-zinc-700 transition hover:bg-zinc-50"
+                      >
+                        Cancel
+                      </button>
+                    </div>
+                  )}
+                </div>
+              ) : null}
 
               {isEditing ? (
                 <div className="mt-6 space-y-6">
@@ -1994,11 +2599,17 @@ export default function MenuDatabasePage() {
                         id="drawer-restaurant-name"
                         type="text"
                         value={drawerEditState.restaurantName}
-                        readOnly
+                        onChange={(event) =>
+                          setDrawerEditState((current) => ({
+                            ...current,
+                            restaurantName: event.target.value,
+                          }))
+                        }
                         className={textInputClassName}
                       />
                       <p className="mt-2 text-xs text-zinc-500">
-                        To change restaurant name or location, use the Restaurants admin.
+                        Safe title edits update this restaurant in place. If the name/address matches another
+                        restaurant record, saving will stop and offer a merge instead.
                       </p>
                     </div>
 

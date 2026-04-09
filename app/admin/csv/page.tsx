@@ -6,11 +6,13 @@ import { geocodeRestaurantLocationViaApi } from '@/lib/geocodingClient';
 import { enrichRestaurantHoursViaApi } from '@/lib/googlePlacesHoursClient';
 import { buildMenuItemUpsert, buildRestaurantUpsert } from '@/lib/menuUpsertShapes';
 import {
+  canonicalizeRestaurantIdentity,
   canonicalizeDietaryCompliance,
   normalizeMenuItemPayload,
   normalizeOptionalText,
   normalizeRestaurantPayload,
 } from '@/lib/menuNormalization';
+import { createRestaurantDuplicateMergeReview } from '@/lib/restaurantMergeClient';
 import { mergeRestaurantLocation } from '@/lib/restaurantLocation';
 import { supabase } from '@/lib/supabaseClient';
 import { buildMenuItemKey } from '@/lib/menuValidation';
@@ -65,6 +67,29 @@ type VisibleRowIssue = {
   status: Exclude<UploadRowOutcomeStatus, 'succeeded'>;
   message: string;
 };
+
+type RestaurantIdentityCandidate = {
+  id: string;
+  created_at: string;
+  name: string | null;
+  address: string | null;
+  city: string | null;
+  region: string | null;
+  postal_code: string | null;
+  latitude: number | null;
+  longitude: number | null;
+  online_ordering_link: string | null;
+};
+
+function sortRestaurantCandidates(candidates: RestaurantIdentityCandidate[]) {
+  return [...candidates].sort((left, right) => {
+    if (left.created_at !== right.created_at) {
+      return left.created_at.localeCompare(right.created_at);
+    }
+
+    return left.id.localeCompare(right.id);
+  });
+}
 
 function triggerRestaurantHoursEnrichment(input: {
   restaurantId: string;
@@ -304,28 +329,34 @@ async function upsertRestaurant(row: {
   const { data: restaurantCandidates, error: existingRestaurantError } = await supabase
     .from('restaurants')
     .select(
-      'id, name, address, city, region, postal_code, latitude, longitude, online_ordering_link'
+      'id, created_at, name, address, city, region, postal_code, latitude, longitude, online_ordering_link'
     );
 
   if (existingRestaurantError) {
     throw existingRestaurantError;
   }
 
-  const existingRestaurant = (restaurantCandidates || []).find((restaurant) => {
-    const normalizedCandidate = normalizeRestaurantPayload({
-      restaurantName: restaurant.name,
-      restaurantAddress: restaurant.address,
-      restaurantCity: restaurant.city,
-      restaurantRegion: restaurant.region,
-      restaurantPostalCode: restaurant.postal_code,
-      onlineOrderingLink: restaurant.online_ordering_link,
-    });
+  const identityKey = canonicalizeRestaurantIdentity(
+    restaurantPayload.name,
+    restaurantPayload.address
+  );
+  const matchingRestaurants = ((restaurantCandidates as RestaurantIdentityCandidate[] | null) ?? []).filter(
+    (restaurant) => canonicalizeRestaurantIdentity(restaurant.name, restaurant.address) === identityKey
+  );
 
-    return (
-      normalizedCandidate.name === restaurantPayload.name &&
-      normalizedCandidate.address === restaurantPayload.address
+  if (matchingRestaurants.length > 1) {
+    const sortedMatches = sortRestaurantCandidates(matchingRestaurants);
+    await createRestaurantDuplicateMergeReview({
+      sourceRestaurantId: sortedMatches[1]!.id,
+      targetRestaurantId: sortedMatches[0]!.id,
+    }).catch(() => null);
+
+    throw new Error(
+      'Multiple existing restaurant records share this restaurant identity. Merge the duplicate restaurants before importing more rows for this location.'
     );
-  });
+  }
+
+  const existingRestaurant = matchingRestaurants[0];
 
   if (existingRestaurant) {
     const shouldUpdateRestaurant =

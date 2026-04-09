@@ -83,19 +83,77 @@ export function normalizeOptionalText(value: string | null | undefined) {
   return normalizedValue ? normalizedValue : null;
 }
 
-export function normalizeRestaurantDisplayName(value: string | null | undefined) {
+export function normalizeAsciiText(value: string | null | undefined) {
   const normalizedValue = normalizeWhitespace(value);
 
   if (!normalizedValue) return '';
 
-  const asciiValue = Array.from(normalizedValue)
+  return Array.from(normalizedValue)
     .map((character) => asciiPunctuationMap[character] ?? asciiLetterMap[character] ?? character)
     .join('')
     .normalize('NFKD')
     .replace(/[\u0300-\u036f]/g, '')
     .replace(/[^\x00-\x7F]/g, '');
+}
 
-  return toTitleCase(asciiValue);
+export function normalizeRestaurantDisplayName(value: string | null | undefined) {
+  return toTitleCase(normalizeAsciiText(value));
+}
+
+function canonicalizeRestaurantIdentityPart(
+  value: string | null | undefined,
+  options?: { isAddress?: boolean }
+) {
+  const asciiValue = normalizeAsciiText(value)
+    .toLowerCase()
+    .replace(/&/g, ' and ')
+    .replace(/'/g, '')
+    .replace(/[^\w\s]/g, ' ')
+    .trim()
+    .replace(/\s+/g, ' ');
+
+  if (!asciiValue || !options?.isAddress) {
+    return asciiValue;
+  }
+
+  const addressTokenMap: Record<string, string> = {
+    street: 'st',
+    avenue: 'ave',
+    boulevard: 'blvd',
+    road: 'rd',
+    drive: 'dr',
+    lane: 'ln',
+    place: 'pl',
+    court: 'ct',
+    suite: 'ste',
+    unit: 'unit',
+    apartment: 'apt',
+    north: 'n',
+    south: 's',
+    east: 'e',
+    west: 'w',
+  };
+
+  return asciiValue
+    .split(' ')
+    .map((token) => addressTokenMap[token] ?? token)
+    .join(' ')
+    .trim()
+    .replace(/\s+/g, ' ');
+}
+
+export function canonicalizeRestaurantIdentity(
+  name: string | null | undefined,
+  address: string | null | undefined
+) {
+  const normalizedName = canonicalizeRestaurantIdentityPart(name);
+  const normalizedAddress = canonicalizeRestaurantIdentityPart(address, { isAddress: true });
+
+  if (!normalizedName && !normalizedAddress) {
+    return null;
+  }
+
+  return `${normalizedName}::${normalizedAddress}`;
 }
 
 export function normalizePrice(value: string | number | null | undefined) {

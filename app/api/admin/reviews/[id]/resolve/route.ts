@@ -5,7 +5,12 @@ import {
   SUPAVORE_ACCESS_TOKEN_COOKIE,
   SUPAVORE_REFRESH_TOKEN_COOKIE,
 } from '@/lib/adminAuth';
-import { resolveHoursPlaceReview } from '@/lib/adminReviewQueue';
+import { resolveAdminReview } from '@/lib/adminReviewQueue';
+import type {
+  RestaurantMergeDisplayNameStrategy,
+  RestaurantMergeHoursStrategy,
+  RestaurantMergeOnlineOrderingLinkStrategy,
+} from '@/lib/restaurantMergeTypes';
 
 export async function POST(
   request: Request,
@@ -26,24 +31,36 @@ export async function POST(
 
   const body = (await request.json().catch(() => null)) as
     | {
-        resolution?: 'approve_candidate_and_sync' | 'reject_candidate' | 'dismiss_without_change';
+        resolution?:
+          | 'approve_candidate_and_sync'
+          | 'reject_candidate'
+          | 'dismiss_without_change'
+          | 'approve_restaurant_merge';
+        mergeParams?: {
+          displayNameStrategy?: RestaurantMergeDisplayNameStrategy;
+          customDisplayName?: string | null;
+          onlineOrderingLinkStrategy?: RestaurantMergeOnlineOrderingLinkStrategy;
+          hoursStrategy?: RestaurantMergeHoursStrategy;
+        };
       }
     | null;
 
   if (
     body?.resolution !== 'approve_candidate_and_sync' &&
     body?.resolution !== 'reject_candidate' &&
-    body?.resolution !== 'dismiss_without_change'
+    body?.resolution !== 'dismiss_without_change' &&
+    body?.resolution !== 'approve_restaurant_merge'
   ) {
     return NextResponse.json({ error: 'Invalid review resolution.' }, { status: 400 });
   }
 
   try {
     const { id } = await context.params;
-    const result = await resolveHoursPlaceReview({
+    const result = await resolveAdminReview({
       reviewId: id,
       resolution: body.resolution,
       reviewerUserId: authResult.user.id,
+      mergeParams: body.mergeParams,
     });
 
     return NextResponse.json(result);

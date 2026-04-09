@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
+  canonicalizeRestaurantIdentity,
   normalizeRestaurantDisplayName,
   normalizeRestaurantPayload,
 } from '@/lib/menuNormalization';
@@ -58,4 +59,18 @@ test('normalizeRestaurantPayload matches accented existing names against future 
 
   assert.equal(existingRestaurant.name, newWrite.name);
   assert.equal(existingRestaurant.address, newWrite.address);
+});
+
+test('canonicalizeRestaurantIdentity ignores punctuation-only name differences', () => {
+  assert.equal(
+    canonicalizeRestaurantIdentity('Blueys', '123 Main Street'),
+    canonicalizeRestaurantIdentity("Bluey's", '123 Main St.')
+  );
+});
+
+test('canonicalizeRestaurantIdentity keeps different addresses distinct', () => {
+  assert.notEqual(
+    canonicalizeRestaurantIdentity("Bluey's", '123 Main St'),
+    canonicalizeRestaurantIdentity("Bluey's", '999 Main St')
+  );
 });

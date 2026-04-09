@@ -22,7 +22,7 @@ export async function GET() {
   }
 
   try {
-    const reviews = await listPendingReviews('restaurant_hours_place_match');
+    const reviews = await listPendingReviews();
     return NextResponse.json(reviews);
   } catch (error) {
     return NextResponse.json(

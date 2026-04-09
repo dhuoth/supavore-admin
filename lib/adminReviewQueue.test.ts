@@ -53,6 +53,12 @@ test('listPendingReviews returns pending review queue items for the requested ty
     async persistHoursResult() {
       throw new Error('not used');
     },
+    async previewRestaurantMerge() {
+      throw new Error('not used');
+    },
+    async executeRestaurantMerge() {
+      throw new Error('not used');
+    },
   });
 
   assert.equal(reviews.length, 1);
@@ -84,6 +90,12 @@ test('getReviewById returns a normalized review queue item', async () => {
       return null;
     },
     async persistHoursResult() {
+      throw new Error('not used');
+    },
+    async previewRestaurantMerge() {
+      throw new Error('not used');
+    },
+    async executeRestaurantMerge() {
       throw new Error('not used');
     },
   });
@@ -157,6 +169,12 @@ test('resolveHoursPlaceReview rejects a low-confidence candidate through the sha
           metadataUpdated: true,
           manualLockSkipped: false,
         };
+      },
+      async previewRestaurantMerge() {
+        throw new Error('not used');
+      },
+      async executeRestaurantMerge() {
+        throw new Error('not used');
       },
     }
   );
