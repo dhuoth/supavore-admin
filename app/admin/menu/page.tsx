@@ -238,6 +238,16 @@ function inputClassName() {
   return 'w-full rounded-xl border border-zinc-200 bg-white px-4 py-3 text-sm text-zinc-950 outline-none transition placeholder:text-zinc-400 focus:border-zinc-400 focus:ring-2 focus:ring-zinc-200';
 }
 
+function statusToggleClassName(params: { isActive: boolean; disabled?: boolean }) {
+  return [
+    'relative inline-flex h-8 w-[92px] items-center rounded-full border px-1 transition',
+    params.isActive
+      ? 'border-emerald-200 bg-emerald-100'
+      : 'border-zinc-200 bg-zinc-200',
+    params.disabled ? 'cursor-not-allowed opacity-60' : 'cursor-pointer',
+  ].join(' ');
+}
+
 function formatPrice(value: number | string | null) {
   if (value === null || value === undefined) return '—';
   return `$${Number(value).toFixed(2)}`;
@@ -568,6 +578,7 @@ export default function MenuDatabasePage() {
   const [duplicateCollisionState, setDuplicateCollisionState] =
     useState<DuplicateCollisionState | null>(null);
   const [mergePanelIntent, setMergePanelIntent] = useState<'duplicate_collision' | null>(null);
+  const [statusSavingById, setStatusSavingById] = useState<Record<string, boolean>>({});
   const [searchQuery, setSearchQuery] = useState('');
   const [statusFilter, setStatusFilter] = useState<'All' | 'Active' | 'Inactive'>('All');
 
@@ -701,6 +712,57 @@ export default function MenuDatabasePage() {
     setSelectedMenuItem(refreshedMenuItem);
     setIsEditing(false);
     setEditingMenuItemId(null);
+  };
+
+  const handleRowStatusToggle = async (params: {
+    menuItemId: string;
+    nextIsActive: boolean;
+    menuItemName: string | null;
+  }) => {
+    const previousRows = menuItems;
+    const previousSelectedMenuItem = selectedMenuItem;
+
+    setSaveError(null);
+    setSaveMessage(null);
+    setStatusSavingById((current) => ({
+      ...current,
+      [params.menuItemId]: true,
+    }));
+    setMenuItems((current) =>
+      current.map((item) =>
+        item.id === params.menuItemId ? { ...item, is_active: params.nextIsActive } : item
+      )
+    );
+    setSelectedMenuItem((current) =>
+      current && current.id === params.menuItemId
+        ? { ...current, is_active: params.nextIsActive }
+        : current
+    );
+
+    try {
+      const { error } = await supabase
+        .from('menu_items')
+        .update({ is_active: params.nextIsActive })
+        .eq('id', params.menuItemId);
+
+      if (error) {
+        throw error;
+      }
+    } catch (error) {
+      setMenuItems(previousRows);
+      setSelectedMenuItem(previousSelectedMenuItem);
+      setSaveError(
+        error instanceof Error
+          ? error.message
+          : `Unable to update ${params.menuItemName || 'menu item'} status right now.`
+      );
+    } finally {
+      setStatusSavingById((current) => {
+        const next = { ...current };
+        delete next[params.menuItemId];
+        return next;
+      });
+    }
   };
 
   useEffect(() => {
@@ -2293,7 +2355,44 @@ export default function MenuDatabasePage() {
                           {row.dietary_compliance || '—'}
                         </td>
                         <td className="px-4 py-4 text-sm text-zinc-700">
-                          {row.is_active ? 'Active' : 'Inactive'}
+                          <button
+                            type="button"
+                            role="switch"
+                            aria-checked={row.is_active}
+                            aria-label={`${row.name || 'Menu item'} ${row.is_active ? 'active' : 'inactive'}. Toggle to ${
+                              row.is_active ? 'inactive' : 'active'
+                            }.`}
+                            disabled={Boolean(statusSavingById[row.id])}
+                            onClick={(event) => {
+                              event.stopPropagation();
+                              void handleRowStatusToggle({
+                                menuItemId: row.id,
+                                nextIsActive: !row.is_active,
+                                menuItemName: row.name,
+                              });
+                            }}
+                            className={statusToggleClassName({
+                              isActive: row.is_active,
+                              disabled: Boolean(statusSavingById[row.id]),
+                            })}
+                          >
+                            <span
+                              className={`absolute inset-y-0 flex items-center text-xs font-medium transition ${
+                                row.is_active
+                                  ? 'left-3 text-emerald-900'
+                                  : 'right-3 justify-end text-zinc-600'
+                              }`}
+                            >
+                              {row.is_active ? 'Active' : 'Inactive'}
+                            </span>
+                            <span
+                              className={`inline-flex h-6 w-6 items-center justify-center rounded-full bg-white text-[10px] font-semibold uppercase tracking-wide text-zinc-700 shadow-sm transition ${
+                                row.is_active ? 'translate-x-[50px]' : 'translate-x-0'
+                              }`}
+                            >
+                              {statusSavingById[row.id] ? '...' : ''}
+                            </span>
+                          </button>
                         </td>
                       </tr>
                     ))
