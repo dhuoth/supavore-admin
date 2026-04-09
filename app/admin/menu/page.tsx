@@ -82,6 +82,7 @@ type DrawerEditState = {
   ingredients: string;
   dietaryOptions: DietaryOption[];
   noModifications: boolean;
+  isActive: boolean;
 };
 
 type DuplicateKeyParts = {
@@ -409,6 +410,7 @@ function createEmptyDrawerEditState(): DrawerEditState {
     ingredients: '',
     dietaryOptions: [],
     noModifications: true,
+    isActive: true,
   };
 }
 
@@ -435,6 +437,7 @@ function buildDrawerEditState(menuItem: MenuItemRow): DrawerEditState {
     ingredients: menuItem.ingredients || '',
     dietaryOptions: canonicalizeDietaryCompliance(menuItem.dietary_compliance),
     noModifications,
+    isActive: menuItem.is_active,
   };
 }
 
@@ -979,7 +982,7 @@ export default function MenuDatabasePage() {
         price_with_modification: finalPriceWithModification,
         ingredients: menuItemPayload.ingredients,
         dietary_compliance: menuItemPayload.dietaryCompliance,
-        is_active: selectedMenuItem.is_active,
+        is_active: drawerEditState.isActive,
       };
 
       console.log('Drawer menu_items update', {
@@ -2198,6 +2201,27 @@ export default function MenuDatabasePage() {
                   </div>
 
                   <div className="grid gap-5">
+                    <div>
+                      <FieldLabel htmlFor="drawer-status" label="Status" required />
+                      <select
+                        id="drawer-status"
+                        value={drawerEditState.isActive ? 'Active' : 'Inactive'}
+                        onChange={(event) =>
+                          setDrawerEditState((current) => ({
+                            ...current,
+                            isActive: event.target.value === 'Active',
+                          }))
+                        }
+                        className={textInputClassName}
+                      >
+                        <option value="Active">Active</option>
+                        <option value="Inactive">Inactive</option>
+                      </select>
+                      <p className="mt-2 text-xs text-zinc-500">
+                        Inactive items stay in Supabase but are excluded from app recommendations.
+                      </p>
+                    </div>
+
                     <div>
                       <FieldLabel
                         htmlFor="drawer-dietary-compliance"
