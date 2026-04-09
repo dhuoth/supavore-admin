@@ -8,39 +8,44 @@ import type {
   RestaurantMergeOnlineOrderingLinkStrategy,
 } from '@/lib/restaurantMergeTypes';
 
-type ReviewResolution =
+export type ReviewResolution =
   | 'approve_candidate_and_sync'
   | 'reject_candidate'
   | 'dismiss_without_change'
   | 'approve_restaurant_merge';
 
-export function ReviewActions({
-  reviewId,
-  onResolved,
-  approveLabel = 'Approve',
-  rejectLabel = 'Reject',
-  approveResolution = 'approve_candidate_and_sync',
-  rejectResolution = 'reject_candidate',
-  mergeParams,
-}: {
+type ReviewActionsProps<TApprove extends ReviewResolution, TReject extends ReviewResolution> = {
   reviewId: string;
-  onResolved?: (resolution: ReviewResolution) => void | Promise<void>;
+  onResolved?: (resolution: TApprove | TReject) => void | Promise<void>;
   approveLabel?: string;
   rejectLabel?: string;
-  approveResolution?: ReviewResolution;
-  rejectResolution?: ReviewResolution;
+  approveResolution?: TApprove;
+  rejectResolution?: TReject;
   mergeParams?: {
     displayNameStrategy?: RestaurantMergeDisplayNameStrategy;
     customDisplayName?: string | null;
     onlineOrderingLinkStrategy?: RestaurantMergeOnlineOrderingLinkStrategy;
     hoursStrategy?: RestaurantMergeHoursStrategy;
   };
-}) {
+};
+
+export function ReviewActions<
+  TApprove extends ReviewResolution = 'approve_candidate_and_sync',
+  TReject extends ReviewResolution = 'reject_candidate'
+>({
+  reviewId,
+  onResolved,
+  approveLabel = 'Approve',
+  rejectLabel = 'Reject',
+  approveResolution = 'approve_candidate_and_sync' as TApprove,
+  rejectResolution = 'reject_candidate' as TReject,
+  mergeParams,
+}: ReviewActionsProps<TApprove, TReject>) {
   const router = useRouter();
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  const handleResolution = async (resolution: ReviewResolution) => {
+  const handleResolution = async (resolution: TApprove | TReject) => {
     setIsSubmitting(true);
     setError(null);
 

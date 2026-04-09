@@ -181,6 +181,12 @@ test('resolveHoursPlaceReview rejects a low-confidence candidate through the sha
 
   assert.equal(result.status, 'low_confidence_match');
   assert.equal(result.ok, true);
-  assert.equal(resolvedPayload?.status, 'rejected');
-  assert.equal(resolvedPayload?.decisionPayload.resolution, 'reject_candidate');
+  const finalResolvedPayload = resolvedPayload as unknown as {
+    status: 'approved' | 'rejected' | 'dismissed';
+    decisionPayload: Record<string, unknown>;
+    resolvedBy?: string | null;
+  };
+  assert.ok(finalResolvedPayload);
+  assert.equal(finalResolvedPayload.status, 'rejected');
+  assert.equal(finalResolvedPayload.decisionPayload.resolution, 'reject_candidate');
 });

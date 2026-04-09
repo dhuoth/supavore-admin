@@ -6,6 +6,10 @@ import {
   syncRestaurantHoursFromGoogle,
   updateRestaurantHoursManually,
 } from '@/lib/restaurantHoursSync';
+import type {
+  EnrichedRestaurantHoursResult,
+  GooglePlaceHoursEnrichmentInput,
+} from '@/lib/googlePlacesHours';
 
 type RestaurantRecord = {
   id: string;
@@ -130,7 +134,8 @@ function createDependencies(options?: {
       },
     },
     dependencies: {
-      async enrichHours() {
+      async enrichHours(input: GooglePlaceHoursEnrichmentInput): Promise<EnrichedRestaurantHoursResult> {
+        void input;
         return (
           options?.enrichResult ?? {
             ok: true as const,
@@ -170,7 +175,10 @@ function createDependencies(options?: {
       async getPendingReview() {
         return pendingReview ? { ...pendingReview } : null;
       },
-      async upsertReviewForResult(currentRestaurant: RestaurantRecord, result) {
+      async upsertReviewForResult(
+        currentRestaurant: RestaurantRecord,
+        result: EnrichedRestaurantHoursResult
+      ) {
         if (
           result.status !== 'review_required_match' &&
           result.status !== 'low_confidence_match'
