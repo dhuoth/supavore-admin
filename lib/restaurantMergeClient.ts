@@ -2,11 +2,15 @@
 
 import type { ExecuteRestaurantMergeParams, RestaurantMergePreview } from '@/lib/restaurantMergeTypes';
 
-async function parseJsonResponse<T>(response: Response) {
+async function parseJsonResponse<T>(response: Response): Promise<T> {
   const payload = (await response.json().catch(() => null)) as (T & { error?: string }) | null;
 
   if (!response.ok) {
     throw new Error(payload?.error || 'Unable to complete the request right now.');
+  }
+
+  if (!payload) {
+    throw new Error('Unable to parse the server response right now.');
   }
 
   return payload;
