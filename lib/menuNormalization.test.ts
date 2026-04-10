@@ -1,6 +1,8 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
+  buildMenuTextNormalizationOverrideReview,
+  canonicalizeMenuItemName,
   canonicalizeRestaurantIdentity,
   normalizeRestaurantDisplayName,
   normalizeRestaurantPayload,
@@ -73,4 +75,44 @@ test('canonicalizeRestaurantIdentity keeps different addresses distinct', () => 
     canonicalizeRestaurantIdentity("Bluey's", '123 Main St'),
     canonicalizeRestaurantIdentity("Bluey's", '999 Main St')
   );
+});
+
+test('buildMenuTextNormalizationOverrideReview flags menu item casing that would be changed', () => {
+  assert.deepEqual(
+    buildMenuTextNormalizationOverrideReview({
+      menuItem: 'Build Your Own (Beef & Broccoli Bowl)',
+      recommendedModification: null,
+      noModifications: true,
+    }),
+    {
+      menuItem: {
+        enteredValue: 'Build Your Own (Beef & Broccoli Bowl)',
+        normalizedValue: 'Build Your Own (beef & Broccoli Bowl)',
+      },
+    }
+  );
+});
+
+test('buildMenuTextNormalizationOverrideReview flags acronym and modification deviations', () => {
+  assert.deepEqual(
+    buildMenuTextNormalizationOverrideReview({
+      menuItem: 'BBQ Chicken',
+      recommendedModification: 'ADD BBQ SAUCE',
+      noModifications: false,
+    }),
+    {
+      menuItem: {
+        enteredValue: 'BBQ Chicken',
+        normalizedValue: 'Bbq Chicken',
+      },
+      recommendedModification: {
+        enteredValue: 'ADD BBQ SAUCE',
+        normalizedValue: 'Add Bbq Sauce',
+      },
+    }
+  );
+});
+
+test('canonicalizeMenuItemName ignores display casing differences', () => {
+  assert.equal(canonicalizeMenuItemName('BBQ Chicken'), canonicalizeMenuItemName('Bbq Chicken'));
 });

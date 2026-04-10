@@ -11,6 +11,8 @@ import {
   type RestaurantHoursBackfillItem,
 } from '@/lib/restaurantHoursBackfill';
 import {
+  buildMenuTextNormalizationOverrideReview,
+  canonicalizeMenuItemName,
   canonicalizeRestaurantIdentity,
   canonicalizeDietaryCompliance,
   dietaryOptions,
@@ -18,6 +20,7 @@ import {
   normalizeOptionalText,
   normalizeRestaurantPayload,
   normalizeWhitespace,
+  type MenuTextNormalizationOverrideReview,
   type DietaryOption,
 } from '@/lib/menuNormalization';
 import {
@@ -578,6 +581,8 @@ export default function MenuDatabasePage() {
   const [duplicateCollisionState, setDuplicateCollisionState] =
     useState<DuplicateCollisionState | null>(null);
   const [mergePanelIntent, setMergePanelIntent] = useState<'duplicate_collision' | null>(null);
+  const [pendingTextOverrideReview, setPendingTextOverrideReview] =
+    useState<MenuTextNormalizationOverrideReview | null>(null);
   const [statusSavingById, setStatusSavingById] = useState<Record<string, boolean>>({});
   const [searchQuery, setSearchQuery] = useState('');
   const [statusFilter, setStatusFilter] = useState<'All' | 'Active' | 'Inactive'>('All');
@@ -789,8 +794,6 @@ export default function MenuDatabasePage() {
     });
   };
 
-  const canonicalizeMenuItemName = (value: string) => value.trim().toLowerCase().replace(/\s+/g, ' ');
-
   const handleReset = () => {
     formRef.current?.reset();
     setNoModifications(true);
@@ -800,6 +803,7 @@ export default function MenuDatabasePage() {
     setSaveError(null);
     setPendingDuplicateCandidate(null);
     setDuplicateOverrideConfirmed(false);
+    setPendingTextOverrideReview(null);
     resetRestaurantMergeState();
   };
 
@@ -812,12 +816,14 @@ export default function MenuDatabasePage() {
     setHoursRecord(null);
     setHoursEditorDays(buildEmptyHoursEditorDays());
     setHoursLoadError(null);
+    setPendingTextOverrideReview(null);
     resetRestaurantMergeState();
   };
 
   const handleCancelEdit = () => {
     setIsEditing(false);
     setEditingMenuItemId(null);
+    setPendingTextOverrideReview(null);
     resetRestaurantMergeState();
     if (selectedMenuItem) {
       setDrawerEditState(buildDrawerEditState(selectedMenuItem));
@@ -1197,7 +1203,7 @@ export default function MenuDatabasePage() {
     });
   };
 
-  const handleDrawerUpdate = async () => {
+  const executeDrawerUpdate = async (allowTextNormalizationOverride = false) => {
     if (!selectedMenuItem || !editingMenuItemId) {
       return;
     }
@@ -1223,16 +1229,41 @@ export default function MenuDatabasePage() {
         dietaryOptions: drawerEditState.dietaryOptions,
         noModifications: drawerEditState.noModifications,
       });
+      const textNormalizationOverrideReview = buildMenuTextNormalizationOverrideReview({
+        menuItem: drawerEditState.menuItem,
+        recommendedModification: drawerEditState.recommendedModification,
+        noModifications: drawerEditState.noModifications,
+      });
+
+      if (textNormalizationOverrideReview && !allowTextNormalizationOverride) {
+        setPendingTextOverrideReview(textNormalizationOverrideReview);
+        return;
+      }
+
       const { restaurantPayload, menuItemPayload, finalModification, finalPriceWithModification } =
         normalizedSubmission;
+      const overriddenMenuItemName = normalizeWhitespace(drawerEditState.menuItem);
+      const overriddenRecommendedModification = drawerEditState.noModifications
+        ? null
+        : normalizeOptionalText(drawerEditState.recommendedModification);
+      const displayMenuItemName =
+        allowTextNormalizationOverride && textNormalizationOverrideReview?.menuItem
+          ? overriddenMenuItemName
+          : menuItemPayload.name;
+      const displayRecommendedModification = drawerEditState.noModifications
+        ? 'No Modifications'
+        : allowTextNormalizationOverride && textNormalizationOverrideReview?.recommendedModification
+          ? overriddenRecommendedModification ?? finalModification
+          : finalModification;
       const existingRestaurant = selectedMenuItem.restaurants;
+      setPendingTextOverrideReview(null);
 
       const menuItemUpdatePayload = {
         restaurant_id: existingRestaurant?.id,
-        name: menuItemPayload.name,
+        name: displayMenuItemName,
         canonical_name: canonicalizeMenuItemName(menuItemPayload.name),
         base_price: menuItemPayload.basePrice,
-        recommended_modification: finalModification,
+        recommended_modification: displayRecommendedModification,
         price_with_modification: finalPriceWithModification,
         ingredients: menuItemPayload.ingredients,
         dietary_compliance: menuItemPayload.dietaryCompliance,
@@ -1496,6 +1527,10 @@ export default function MenuDatabasePage() {
     } finally {
       setIsSaving(false);
     }
+  };
+
+  const handleDrawerUpdate = () => {
+    void executeDrawerUpdate(false);
   };
 
   const loadRestaurantHours = async (restaurantId: string) => {
@@ -2448,6 +2483,7 @@ export default function MenuDatabasePage() {
                     <button
                       type="button"
                       onClick={() => {
+                        setPendingTextOverrideReview(null);
                         setIsEditing(true);
                         setEditingMenuItemId(selectedMenuItem.id);
                         setDrawerEditState(buildDrawerEditState(selectedMenuItem));
@@ -2469,6 +2505,87 @@ export default function MenuDatabasePage() {
 
               {saveError ? <p className="mt-4 text-sm text-red-600">{saveError}</p> : null}
               {saveMessage ? <p className="mt-4 text-sm text-zinc-600">{saveMessage}</p> : null}
+              {pendingTextOverrideReview ? (
+                <div
+                  className="fixed inset-0 z-[60] flex items-center justify-center bg-black/40 px-4"
+                  onClick={() => setPendingTextOverrideReview(null)}
+                >
+                  <div
+                    className="w-full max-w-xl rounded-3xl bg-white p-6 shadow-2xl"
+                    onClick={(event) => event.stopPropagation()}
+                  >
+                    <h3 className="text-lg font-semibold text-zinc-950">
+                      Confirm Text Override
+                    </h3>
+                    <p className="mt-2 text-sm text-zinc-600">
+                      This manual edit deviates from the standard normalization rules. Confirm to
+                      save your exact admin-entered text for display while keeping normalized
+                      matching in the background.
+                    </p>
+
+                    <div className="mt-5 space-y-4">
+                      {pendingTextOverrideReview.menuItem ? (
+                        <div className="rounded-2xl border border-zinc-200 bg-zinc-50 p-4">
+                          <p className="text-sm font-medium text-zinc-900">Menu Item</p>
+                          <p className="mt-2 text-xs uppercase tracking-wide text-zinc-500">
+                            Admin Entered
+                          </p>
+                          <p className="mt-1 text-sm text-zinc-900">
+                            {pendingTextOverrideReview.menuItem.enteredValue}
+                          </p>
+                          <p className="mt-3 text-xs uppercase tracking-wide text-zinc-500">
+                            Standard Normalized
+                          </p>
+                          <p className="mt-1 text-sm text-zinc-700">
+                            {pendingTextOverrideReview.menuItem.normalizedValue}
+                          </p>
+                        </div>
+                      ) : null}
+
+                      {pendingTextOverrideReview.recommendedModification ? (
+                        <div className="rounded-2xl border border-zinc-200 bg-zinc-50 p-4">
+                          <p className="text-sm font-medium text-zinc-900">
+                            Recommended Modification
+                          </p>
+                          <p className="mt-2 text-xs uppercase tracking-wide text-zinc-500">
+                            Admin Entered
+                          </p>
+                          <p className="mt-1 text-sm text-zinc-900">
+                            {pendingTextOverrideReview.recommendedModification.enteredValue}
+                          </p>
+                          <p className="mt-3 text-xs uppercase tracking-wide text-zinc-500">
+                            Standard Normalized
+                          </p>
+                          <p className="mt-1 text-sm text-zinc-700">
+                            {pendingTextOverrideReview.recommendedModification.normalizedValue}
+                          </p>
+                        </div>
+                      ) : null}
+                    </div>
+
+                    <div className="mt-6 flex flex-wrap justify-end gap-3">
+                      <button
+                        type="button"
+                        onClick={() => setPendingTextOverrideReview(null)}
+                        disabled={isSaving}
+                        className="inline-flex items-center justify-center rounded-2xl border border-zinc-200 bg-white px-4 py-2 text-sm font-medium text-zinc-700 transition hover:bg-zinc-50"
+                      >
+                        Cancel
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => {
+                          void executeDrawerUpdate(true);
+                        }}
+                        disabled={isSaving}
+                        className="inline-flex items-center justify-center rounded-2xl bg-black px-4 py-2 text-sm font-medium text-white transition hover:bg-neutral-800"
+                      >
+                        {isSaving ? 'Saving...' : 'Confirm Override'}
+                      </button>
+                    </div>
+                  </div>
+                </div>
+              ) : null}
               {duplicateCollisionState ? (
                 <div
                   ref={mergePanelRef}
@@ -2804,12 +2921,13 @@ export default function MenuDatabasePage() {
                         id="drawer-menu-item"
                         type="text"
                         value={drawerEditState.menuItem}
-                        onChange={(event) =>
+                        onChange={(event) => {
+                          setPendingTextOverrideReview(null);
                           setDrawerEditState((current) => ({
                             ...current,
                             menuItem: event.target.value,
-                          }))
-                        }
+                          }));
+                        }}
                         className={textInputClassName}
                       />
                     </div>
@@ -2863,15 +2981,16 @@ export default function MenuDatabasePage() {
                         id="drawer-no-modifications"
                         type="checkbox"
                         checked={drawerEditState.noModifications}
-                        onChange={(event) =>
+                        onChange={(event) => {
+                          setPendingTextOverrideReview(null);
                           setDrawerEditState((current) => ({
                             ...current,
                             noModifications: event.target.checked,
                             recommendedModification: event.target.checked
                               ? ''
                               : current.recommendedModification,
-                          }))
-                        }
+                          }));
+                        }}
                         className="mt-1 h-4 w-4 rounded border-zinc-300 text-zinc-900 focus:ring-zinc-300"
                       />
                       <div>
@@ -2898,12 +3017,13 @@ export default function MenuDatabasePage() {
                           id="drawer-recommended-modification"
                           type="text"
                           value={drawerEditState.recommendedModification}
-                          onChange={(event) =>
+                          onChange={(event) => {
+                            setPendingTextOverrideReview(null);
                             setDrawerEditState((current) => ({
                               ...current,
                               recommendedModification: event.target.value,
-                            }))
-                          }
+                            }));
+                          }}
                           className={textInputClassName}
                         />
                       </div>

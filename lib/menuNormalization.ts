@@ -227,6 +227,63 @@ export function normalizeRestaurantPayload(payload: {
   };
 }
 
+export function canonicalizeMenuItemName(value: string | null | undefined) {
+  return normalizeWhitespace(value).toLowerCase().replace(/\s+/g, ' ');
+}
+
+export type MenuTextNormalizationOverride = {
+  enteredValue: string;
+  normalizedValue: string;
+};
+
+export type MenuTextNormalizationOverrideReview = {
+  menuItem?: MenuTextNormalizationOverride;
+  recommendedModification?: MenuTextNormalizationOverride;
+};
+
+export function buildMenuTextNormalizationOverrideReview(payload: {
+  menuItem: string | null | undefined;
+  recommendedModification: string | null | undefined;
+  noModifications: boolean;
+}) {
+  const enteredMenuItem = normalizeWhitespace(payload.menuItem);
+  const normalizedMenuItem = toTitleCase(payload.menuItem);
+  const menuItemOverride =
+    enteredMenuItem && enteredMenuItem !== normalizedMenuItem
+      ? {
+          enteredValue: enteredMenuItem,
+          normalizedValue: normalizedMenuItem,
+        }
+      : null;
+
+  const enteredRecommendedModification = payload.noModifications
+    ? null
+    : normalizeOptionalText(payload.recommendedModification);
+  const normalizedRecommendedModification = payload.noModifications
+    ? null
+    : normalizeOptionalText(toTitleCase(payload.recommendedModification));
+  const recommendedModificationOverride =
+    enteredRecommendedModification &&
+    normalizedRecommendedModification &&
+    enteredRecommendedModification !== normalizedRecommendedModification
+      ? {
+          enteredValue: enteredRecommendedModification,
+          normalizedValue: normalizedRecommendedModification,
+        }
+      : null;
+
+  if (!menuItemOverride && !recommendedModificationOverride) {
+    return null;
+  }
+
+  return {
+    ...(menuItemOverride ? { menuItem: menuItemOverride } : {}),
+    ...(recommendedModificationOverride
+      ? { recommendedModification: recommendedModificationOverride }
+      : {}),
+  } satisfies MenuTextNormalizationOverrideReview;
+}
+
 export function normalizeMenuItemPayload(payload: {
   menuItem: string | null | undefined;
   basePrice: string | number | null | undefined;
