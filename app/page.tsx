@@ -26,6 +26,7 @@ export default async function Home() {
     { label: 'Map', href: '/admin/map' },
     { label: 'Users', href: '/admin/users' },
     { label: 'Coverage Requests', href: '/admin/coverage-requests' },
+    { label: 'Cost & Usage', href: '/admin/cost' },
   ];
 
   return (
